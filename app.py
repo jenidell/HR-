@@ -44,7 +44,8 @@ def login_view():
 def logout_button():
     with st.sidebar:
         user = st.session_state["user"]
-        st.markdown(f"**{user['name']}** ({user['department']})")
+        st.markdown(f"**{user['name']}**")
+        st.caption(f"{user['category']} · {user['department']}")
         st.caption("관리자" if user["role"] == "admin" else "직원")
         if st.button("로그아웃", use_container_width=True):
             del st.session_state["user"]
@@ -97,26 +98,35 @@ def employee_view(user):
 
 
 # ---------------------------------------------------------------------------
-# 팀 일괄입력: 팀 담당자가 하루치 팀 전체 근태를 한번에 입력
+# 일괄입력: 본사 부서 / 직영·소사장 매장 담당자가 하루치 소속 인원 전체를 한번에 입력
 # ---------------------------------------------------------------------------
 def bulk_entry_view(user):
-    st.header("팀 일괄입력")
-    st.caption("팀 담당자가 하루 단위로 팀 전체 근태를 한번에 입력할 수 있어요.")
+    st.header("일괄입력")
+    st.caption("본사 부서, 직영·소사장 매장 담당자가 하루 단위로 소속 인원 전체 근태를 한번에 입력할 수 있어요.")
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     with c1:
         work_date = st.date_input("날짜", value=date.today(), key="bulk_date")
     with c2:
-        dept_options = db.DEPARTMENTS
-        default_idx = dept_options.index(user["department"]) if user["department"] in dept_options else 0
-        dept = st.selectbox("부서 선택", dept_options, index=default_idx, key="bulk_dept")
+        cat_options = db.CATEGORIES
+        default_cat_idx = cat_options.index(user["category"]) if user["category"] in cat_options else 0
+        category = st.selectbox("구분", cat_options, index=default_cat_idx, key="bulk_category")
+    with c3:
+        org_options = db.get_org_units(category)
+        if category == user["category"] and user["department"] in org_options:
+            default_org_idx = org_options.index(user["department"])
+        else:
+            default_org_idx = 0
+        org_unit = st.selectbox(
+            "부서/매장 선택", org_options, index=default_org_idx, key=f"bulk_org_{category}"
+        )
 
-    members = db.list_users_by_department(dept)
+    members = db.list_users_by_org(category, org_unit)
     if not members:
-        st.info(f"'{dept}'에 소속된 직원이 없습니다.")
+        st.info(f"'{org_unit}'에 소속된 직원이 없습니다.")
         return
 
-    existing = db.get_attendance_for_date(work_date.isoformat(), dept)
+    existing = db.get_attendance_for_date(work_date.isoformat(), category, org_unit)
 
     with st.form("bulk_attendance_form"):
         entries = {}
@@ -141,12 +151,12 @@ def bulk_entry_view(user):
                 )
             entries[m["id"]] = (code, memo)
 
-        submitted = st.form_submit_button(f"{dept} 전체 저장 ({work_date.isoformat()})", use_container_width=True)
+        submitted = st.form_submit_button(f"{org_unit} 전체 저장 ({work_date.isoformat()})", use_container_width=True)
 
     if submitted:
         for user_id, (code, memo) in entries.items():
             db.upsert_attendance(user_id, work_date.isoformat(), code, memo)
-        st.success(f"{work_date.isoformat()} 기준 {dept} {len(entries)}명 근태가 저장되었습니다.")
+        st.success(f"{work_date.isoformat()} 기준 {org_unit} {len(entries)}명 근태가 저장되었습니다.")
         st.rerun()
 
 
@@ -158,7 +168,7 @@ def admin_view(user):
 
     with tab1:
         st.subheader("전체 근태 현황")
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             start = st.date_input(
                 "조회 시작일", value=date.today().replace(day=1), key="admin_start"
@@ -166,14 +176,20 @@ def admin_view(user):
         with c2:
             end = st.date_input("조회 종료일", value=date.today(), key="admin_end")
         with c3:
-            dept = st.selectbox("부서", ["전체"] + db.DEPARTMENTS, key="admin_dept")
+            category = st.selectbox("구분", ["전체"] + db.CATEGORIES, key="admin_category")
+        with c4:
+            if category == "전체":
+                org_options = ["전체"] + db.DEPARTMENTS + db.JIKYEONG_STORES + db.SOSAJANG_STORES
+            else:
+                org_options = ["전체"] + db.get_org_units(category)
+            org_unit = st.selectbox("부서/매장", org_options, key=f"admin_org_{category}")
 
-        records = db.get_all_attendance(start.isoformat(), end.isoformat(), dept)
+        records = db.get_all_attendance(start.isoformat(), end.isoformat(), category, org_unit)
         if records:
             df = pd.DataFrame(records)[
-                ["work_date", "department", "name", "code", "memo", "updated_at"]
+                ["work_date", "category", "department", "name", "code", "memo", "updated_at"]
             ]
-            df.columns = ["날짜", "부서", "이름", "근태코드", "메모", "최종수정"]
+            df.columns = ["날짜", "구분", "부서/매장", "이름", "근태코드", "메모", "최종수정"]
             st.dataframe(df, use_container_width=True, hide_index=True)
 
             # 엑셀 다운로드
@@ -191,6 +207,16 @@ def admin_view(user):
 
     with tab2:
         st.subheader("직원 계정 추가")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            add_category = st.selectbox("구분", db.CATEGORIES, key="add_user_category")
+        with c2:
+            add_org_options = db.get_org_units(add_category)
+            add_org_unit = st.selectbox(
+                "부서/매장", add_org_options, key=f"add_user_org_{add_category}"
+            )
+
         with st.form("add_user_form"):
             c1, c2 = st.columns(2)
             with c1:
@@ -198,7 +224,6 @@ def admin_view(user):
                 new_name = st.text_input("이름")
             with c2:
                 new_password = st.text_input("초기 비밀번호", type="password")
-                new_dept = st.selectbox("부서", db.DEPARTMENTS)
             new_role = st.radio("권한", ["employee", "admin"], horizontal=True,
                                  format_func=lambda x: "일반 직원" if x == "employee" else "관리자")
             submitted = st.form_submit_button("계정 생성", use_container_width=True)
@@ -207,10 +232,11 @@ def admin_view(user):
                 st.error("아이디, 이름, 초기 비밀번호는 필수입니다.")
             else:
                 ok, msg = db.create_user(
-                    new_username.strip(), new_password, new_name.strip(), new_dept, new_role
+                    new_username.strip(), new_password, new_name.strip(),
+                    add_category, add_org_unit, new_role,
                 )
                 if ok:
-                    st.success(msg)
+                    st.success(f"{msg} ({add_category} · {add_org_unit})")
                     st.rerun()
                 else:
                     st.error(msg)
@@ -220,15 +246,15 @@ def admin_view(user):
         users = db.list_users()
         udf = pd.DataFrame(users)
         if not udf.empty:
-            udf_display = udf[["username", "name", "department", "role"]].copy()
-            udf_display.columns = ["아이디", "이름", "부서", "권한"]
+            udf_display = udf[["username", "name", "category", "department", "role"]].copy()
+            udf_display.columns = ["아이디", "이름", "구분", "부서/매장", "권한"]
             st.dataframe(udf_display, use_container_width=True, hide_index=True)
 
             with st.expander("계정 비활성화(퇴사 처리)"):
                 target = st.selectbox(
                     "비활성화할 직원",
                     users,
-                    format_func=lambda u: f"{u['name']} ({u['username']}, {u['department']})",
+                    format_func=lambda u: f"{u['name']} ({u['username']}, {u['category']} · {u['department']})",
                 )
                 if st.button("선택한 계정 비활성화", type="secondary"):
                     if target["username"] == "admin":
@@ -253,7 +279,7 @@ def main():
     st.title("🗂️ (주)대교통신 HR 플랫폼")
 
     if user["role"] == "admin":
-        tab_emp, tab_bulk, tab_admin = st.tabs(["내 근태입력", "팀 일괄입력", "관리자"])
+        tab_emp, tab_bulk, tab_admin = st.tabs(["내 근태입력", "일괄입력", "관리자"])
         with tab_emp:
             employee_view(user)
         with tab_bulk:
@@ -261,7 +287,7 @@ def main():
         with tab_admin:
             admin_view(user)
     else:
-        tab_emp, tab_bulk = st.tabs(["내 근태입력", "팀 일괄입력"])
+        tab_emp, tab_bulk = st.tabs(["내 근태입력", "일괄입력"])
         with tab_emp:
             employee_view(user)
         with tab_bulk:
