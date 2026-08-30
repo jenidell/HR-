@@ -494,7 +494,7 @@ def _kakao_calendar_view(category, year, month):
             by_date.setdefault(r["work_date"], set()).add(r["store"])
         unit_label = f"매장 {total}곳"
     else:
-        cat_employees = [e for e in db.list_users(include_inactive=False) if e["category"] == category]
+        cat_employees = db.list_attendance_users(category)
         total = len(cat_employees)
         if total == 0:
             st.caption(f"등록된 {category} 직원이 없어 반영 현황을 표시할 수 없어요.")
@@ -520,6 +520,24 @@ def _kakao_calendar_view(category, year, month):
     )
     rows_html = [f"<tr>{header_cells}</tr>"]
 
+    name_of = {x["id"]: x["name"] for x in cat_employees}
+
+    def _missing_html(day):
+        """그 날짜에 아직 안 올라온 사람(매장) 이름을 칸 안에 넣을 HTML"""
+        entered = by_date.get(day.isoformat(), set())
+        names = sorted(name_of[i] for i in name_of if i not in entered)
+        if not names:
+            return ""
+        shown, rest = names[:8], len(names) - 8
+        html = "".join(
+            "<div style='font-size:9px;line-height:1.3;color:#c0392b;"
+            f"white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{n}</div>"
+            for n in shown
+        )
+        if rest > 0:
+            html += f"<div style='font-size:9px;color:#999'>외 {rest}</div>"
+        return html
+
     for week in Calendar(firstweekday=0).monthdatescalendar(year, month):
         cells = []
         for day in week:
@@ -527,16 +545,19 @@ def _kakao_calendar_view(category, year, month):
                 cells.append("<td></td>")
             elif day > today:
                 cells.append(
-                    "<td style='text-align:center;border:1px solid #eee;border-radius:6px;"
-                    "padding:3px 0;color:#ccc'>"
-                    f"<div style='font-size:11px'>{day.day}</div><div style='font-size:13px'>&nbsp;</div></td>"
+                    "<td style='border:1px solid #eee;border-radius:6px;padding:3px 1px;"
+                    "color:#ccc;vertical-align:top;text-align:center'>"
+                    f"<div style='font-size:11px'>{day.day}</div></td>"
                 )
             else:
                 cnt = len(by_date.get(day.isoformat(), set()))
                 icon = "❌" if cnt == 0 else ("⚠️" if cnt < total else "✅")
+                body = "" if icon == "✅" else _missing_html(day)
                 cells.append(
-                    "<td style='text-align:center;border:1px solid #eee;border-radius:6px;padding:3px 0'>"
-                    f"<div style='font-size:11px'>{day.day}</div><div style='font-size:13px'>{icon}</div></td>"
+                    "<td style='border:1px solid #eee;border-radius:6px;padding:3px 1px;"
+                    "vertical-align:top;text-align:center'>"
+                    f"<div style='font-size:11px'>{day.day}</div>"
+                    f"<div style='font-size:12px'>{icon}</div>{body}</td>"
                 )
         rows_html.append(f"<tr>{''.join(cells)}</tr>")
 
@@ -546,29 +567,16 @@ def _kakao_calendar_view(category, year, month):
     )
     st.markdown(table_html, unsafe_allow_html=True)
 
-    weekday_kr2 = ["월", "화", "수", "목", "금", "토", "일"]
-    emp_names_by_id = {e["id"]: e["name"] for e in cat_employees}
-    missing_lines = []
-    d = month_start
-    while d <= min(month_end, today):
-        entered_ids = by_date.get(d.isoformat(), set())
-        missing_ids = [uid for uid in emp_names_by_id if uid not in entered_ids]
-        if missing_ids:
-            missing_names = ", ".join(
-                sorted(emp_names_by_id[uid] for uid in missing_ids)
-            )
-            missing_lines.append(f"**{d.month}/{d.day}({weekday_kr2[d.weekday()]})** — {missing_names}")
-        d += timedelta(days=1)
-
-    # 예전엔 펼침 메뉴 안에 숨겨뒀는데, "캘린더 안에 이름이 바로 보였으면 좋겠다"는 요청으로
-    # 클릭 없이 항상 보이게 바꿈
+    last_day = min(month_end, today)
+    n_missing = sum(
+        1 for i in range((last_day - month_start).days + 1)
+        if len(by_date.get((month_start + timedelta(days=i)).isoformat(), set())) < total
+    )
     who = "매장" if category == "소사장" else "사람"
-    st.markdown(f"**❌⚠️ 날짜별로 아직 안 올라온 {who} ({len(missing_lines)}일)**")
-    if not missing_lines:
+    if n_missing == 0:
         st.caption(f"이번 달은 지난 날짜 전부 등록된 {who} 전체가 반영됐어요!")
     else:
-        for line in missing_lines:
-            st.markdown(line)
+        st.caption(f"빨간 이름이 그 날짜에 아직 안 올라온 {who}이에요. (총 {n_missing}일)")
 
 
 def kakao_calendar_view(user):
@@ -676,7 +684,7 @@ def kakao_import_view(user):
         st.divider()
         st.markdown(f"**미리보기 — {len(parsed)}건 인식됨. 확인하고 틀린 부분은 고친 뒤 저장하세요.**")
 
-        cat_employees = [e for e in db.list_users(include_inactive=False) if e["category"] == category]
+        cat_employees = db.list_attendance_users(category)
         emp_names = [e["name"] for e in cat_employees]
 
         def _auto_match(row):
@@ -1198,7 +1206,7 @@ def excel_export_view(user):
         # --- 본사 ---
         def _bonsa_build():
             roster = [{"name": e["name"], "department": e["department"]}
-                      for e in db.list_users(include_inactive=False) if e["category"] == "본사"]
+                      for e in db.list_attendance_users("본사")]
             roster.sort(key=lambda e: (db.DEPARTMENTS.index(e["department"])
                                        if e["department"] in db.DEPARTMENTS else 99, e["name"]))
             recs, memos = _person_records("본사", start, end)
@@ -1214,7 +1222,7 @@ def excel_export_view(user):
         # --- 직영점 ---
         def _jik_build():
             roster = [{"name": e["name"], "department": e["department"]}
-                      for e in db.list_users(include_inactive=False) if e["category"] == "직영"]
+                      for e in db.list_attendance_users("직영")]
             recs, memos = _person_records("직영", start, end)
             return excel_export.build_jikyeong_form(year, month, roster, recs, memos,
                                                     store_order=db.JIKYEONG_STORES)
