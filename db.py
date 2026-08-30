@@ -68,6 +68,30 @@ SOSAJANG_STORES = [
 ]
 
 
+# 최초 실행 시 자동으로 만들어지는 시스템 관리자 계정.
+# 사람이 아니라 앱 관리용 계정이므로 근태 집계에서는 항상 제외합니다.
+SYSTEM_ACCOUNT_USERNAME = "admin"
+_NOT_SYSTEM = f"username != '{SYSTEM_ACCOUNT_USERNAME}'"
+
+
+def list_attendance_users(category=None, org_unit=None):
+    """근태 대상 직원 목록 (시스템 관리자 계정 제외)"""
+    conn = get_conn()
+    q = ("SELECT id, username, name, category, department, role FROM users "
+         f"WHERE active = 1 AND {_NOT_SYSTEM}")
+    params = []
+    if category:
+        q += " AND category = ?"
+        params.append(category)
+    if org_unit:
+        q += " AND department = ?"
+        params.append(org_unit)
+    q += " ORDER BY category, department, name"
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def get_org_units(category: str):
     """구분(본사/직영/소사장)에 따른 소속(부서 또는 매장) 목록 반환"""
     if category == "직영":
@@ -273,7 +297,7 @@ def list_users_by_org(category: str, org_unit: str):
     conn = get_conn()
     rows = conn.execute(
         "SELECT id, username, name, category, department, role FROM users "
-        "WHERE active = 1 AND category = ? AND department = ? ORDER BY name",
+        f"WHERE active = 1 AND {_NOT_SYSTEM} AND category = ? AND department = ? ORDER BY name",
         (category, org_unit),
     ).fetchall()
     conn.close()
@@ -382,7 +406,7 @@ def get_org_unit_summary_for_date(work_date: str):
     (관리자 화면의 '미입력 매장/부서 확인'에서 사용)"""
     conn = get_conn()
     unit_counts = conn.execute(
-        "SELECT category, department, COUNT(*) as cnt FROM users WHERE active = 1 "
+        f"SELECT category, department, COUNT(*) as cnt FROM users WHERE active = 1 AND {_NOT_SYSTEM} "
         "GROUP BY category, department"
     ).fetchall()
     entered = conn.execute(
