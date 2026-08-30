@@ -9,7 +9,6 @@
 """
 
 import io
-import os
 import re
 from datetime import date, timedelta
 
@@ -21,36 +20,6 @@ import db
 
 st.set_page_config(page_title="(주)대교통신 HR 플랫폼", page_icon="🗂️", layout="wide")
 db.init_db()
-
-DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
-
-
-def _list_docs(subfolder: str):
-    """docs/<subfolder> 안의 파일 목록을 (파일명, 전체경로) 리스트로 반환. 폴더가 없으면 빈 리스트."""
-    folder = os.path.join(DOCS_DIR, subfolder)
-    if not os.path.isdir(folder):
-        return []
-    files = []
-    for fname in sorted(os.listdir(folder)):
-        fpath = os.path.join(folder, fname)
-        if os.path.isfile(fpath) and not fname.startswith(".") and fname.lower() != "readme.md":
-            files.append((fname, fpath))
-    return files
-
-
-def documents_view(subfolder: str, empty_msg: str):
-    files = _list_docs(subfolder)
-    if not files:
-        st.info(empty_msg)
-        return
-    for fname, fpath in files:
-        with open(fpath, "rb") as f:
-            data = f.read()
-        st.download_button(
-            f"📄 {fname}", data=data, file_name=fname,
-            key=f"doc_dl_{subfolder}_{fname}", use_container_width=True,
-        )
-
 
 def _build_bulk_template():
     """직원 일괄 등록용 빈 엑셀 양식 (예시 3줄 포함) 생성"""
@@ -298,44 +267,6 @@ def bulk_entry_view(user):
                 f"{', '.join(skipped_names)} — 확인 후 다시 입력해주세요."
             )
         st.rerun()
-
-
-# ---------------------------------------------------------------------------
-# 공지사항
-# ---------------------------------------------------------------------------
-def announcements_view(user):
-    st.header("공지사항")
-
-    if user["role"] == "admin":
-        with st.expander("공지 작성"):
-            with st.form("new_announcement_form"):
-                title = st.text_input("제목")
-                content = st.text_area("내용", height=150)
-                submitted = st.form_submit_button("게시", use_container_width=True)
-            if submitted:
-                if not title.strip() or not content.strip():
-                    st.error("제목과 내용을 모두 입력해주세요.")
-                else:
-                    db.create_announcement(title.strip(), content.strip(), user["id"])
-                    st.success("공지사항이 등록되었습니다.")
-                    st.rerun()
-        st.divider()
-
-    announcements = db.list_announcements()
-    if not announcements:
-        st.info("등록된 공지사항이 없습니다.")
-        return
-
-    for a in announcements:
-        with st.container(border=True):
-            st.markdown(f"**{a['title']}**")
-            st.caption(f"{a['author_name']} · {(a['created_at'] or '')[:16].replace('T', ' ')}")
-            st.write(a["content"])
-            if user["role"] == "admin":
-                if st.button("삭제", key=f"ann_del_{a['id']}"):
-                    db.delete_announcement(a["id"])
-                    st.success("삭제되었습니다.")
-                    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -855,310 +786,308 @@ def build_category_format_excel(start_date, end_date):
 
 
 # ---------------------------------------------------------------------------
-# 관리자용: 전체 현황 + 계정 관리
+# 관리자용: 전체 근태현황
 # ---------------------------------------------------------------------------
-def admin_view(user):
-    tab1, tab_kakao, tab2 = st.tabs(["전체 근태 현황", "카톡 근태 가져오기", "직원 계정 관리"])
+def admin_status_view(user):
+    st.subheader("근태 미입력 매장/부서 확인")
+    check_date = st.date_input("확인할 날짜", value=date.today(), key="missing_check_date")
+    summary = db.get_org_unit_summary_for_date(check_date.isoformat())
+    missing = [s for s in summary if s["employee_count"] > 0 and s["entered_count"] == 0]
+    if missing:
+        st.warning(f"{check_date.isoformat()} 기준, 근태 입력이 하나도 없는 부서/매장이 {len(missing)}곳 있어요.")
+        miss_df = pd.DataFrame(missing)[["category", "department", "employee_count"]]
+        miss_df.columns = ["구분", "부서/매장", "재직 인원"]
+        st.dataframe(miss_df, use_container_width=True, hide_index=True)
+    else:
+        st.success(f"{check_date.isoformat()} 기준, 모든 부서/매장에 근태가 입력되었어요.")
 
-    with tab_kakao:
-        kakao_import_view(user)
-
-    with tab1:
-        st.subheader("근태 미입력 매장/부서 확인")
-        check_date = st.date_input("확인할 날짜", value=date.today(), key="missing_check_date")
-        summary = db.get_org_unit_summary_for_date(check_date.isoformat())
-        missing = [s for s in summary if s["employee_count"] > 0 and s["entered_count"] == 0]
-        if missing:
-            st.warning(f"{check_date.isoformat()} 기준, 근태 입력이 하나도 없는 부서/매장이 {len(missing)}곳 있어요.")
-            miss_df = pd.DataFrame(missing)[["category", "department", "employee_count"]]
-            miss_df.columns = ["구분", "부서/매장", "재직 인원"]
-            st.dataframe(miss_df, use_container_width=True, hide_index=True)
-        else:
-            st.success(f"{check_date.isoformat()} 기준, 모든 부서/매장에 근태가 입력되었어요.")
-
-        st.divider()
-        st.subheader("전체 근태 현황")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            start = st.date_input(
-                "조회 시작일", value=date.today().replace(day=1), key="admin_start"
-            )
-        with c2:
-            end = st.date_input("조회 종료일", value=date.today(), key="admin_end")
-        with c3:
-            category = st.selectbox("구분", ["전체"] + db.CATEGORIES, key="admin_category")
-        with c4:
-            if category == "전체":
-                org_options = ["전체"] + db.DEPARTMENTS + db.JIKYEONG_STORES + db.SOSAJANG_STORES
-            else:
-                org_options = ["전체"] + db.get_org_units(category)
-            org_unit = st.selectbox("부서/매장", org_options, key=f"admin_org_{category}")
-
-        st.markdown("**근태표 양식으로 다운로드 (본사·직영·소사장 원본 서식)**")
-        st.caption(
-            "예전에 쓰시던 본사근태·직영근태 파일과 같은 매장/부서·직원명 × 날짜 표, "
-            "소사장근태(출첵) 파일과 같은 매장 단위 요약표로 시트를 나눠서 받아요. "
-            "위 조회 시작일/종료일 기준으로 만들어집니다."
+    st.divider()
+    st.subheader("전체 근태 현황")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        start = st.date_input(
+            "조회 시작일", value=date.today().replace(day=1), key="admin_start"
         )
-        matrix_bytes = build_category_format_excel(start, end)
-        if matrix_bytes:
-            st.download_button(
-                "근태표 양식 엑셀 다운로드",
-                data=matrix_bytes,
-                file_name=f"근태표_{start.isoformat()}_{end.isoformat()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="matrix_download",
-            )
+    with c2:
+        end = st.date_input("조회 종료일", value=date.today(), key="admin_end")
+    with c3:
+        category = st.selectbox("구분", ["전체"] + db.CATEGORIES, key="admin_category")
+    with c4:
+        if category == "전체":
+            org_options = ["전체"] + db.DEPARTMENTS + db.JIKYEONG_STORES + db.SOSAJANG_STORES
         else:
-            st.info("등록된 직원이 없어 근태표를 만들 수 없습니다.")
+            org_options = ["전체"] + db.get_org_units(category)
+        org_unit = st.selectbox("부서/매장", org_options, key=f"admin_org_{category}")
 
-        st.divider()
+    st.markdown("**근태표 양식으로 다운로드 (본사·직영·소사장 원본 서식)**")
+    st.caption(
+        "예전에 쓰시던 본사근태·직영근태 파일과 같은 매장/부서·직원명 × 날짜 표, "
+        "소사장근태(출첵) 파일과 같은 매장 단위 요약표로 시트를 나눠서 받아요. "
+        "위 조회 시작일/종료일 기준으로 만들어집니다."
+    )
+    matrix_bytes = build_category_format_excel(start, end)
+    if matrix_bytes:
+        st.download_button(
+            "근태표 양식 엑셀 다운로드",
+            data=matrix_bytes,
+            file_name=f"근태표_{start.isoformat()}_{end.isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="matrix_download",
+        )
+    else:
+        st.info("등록된 직원이 없어 근태표를 만들 수 없습니다.")
 
-        records = db.get_all_attendance(start.isoformat(), end.isoformat(), category, org_unit)
-        if records:
-            df = pd.DataFrame(records)[
-                ["work_date", "category", "department", "name", "code", "memo", "updated_at"]
-            ]
-            df.columns = ["날짜", "구분", "부서/매장", "이름", "근태코드", "메모", "최종수정"]
-            st.dataframe(df, use_container_width=True, hide_index=True)
+    st.divider()
 
-            # 엑셀 다운로드
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="근태현황")
-            st.download_button(
-                "엑셀로 다운로드",
-                data=buf.getvalue(),
-                file_name=f"근태현황_{start.isoformat()}_{end.isoformat()}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        else:
-            st.info("해당 조건에 입력된 근태 내역이 없습니다.")
+    records = db.get_all_attendance(start.isoformat(), end.isoformat(), category, org_unit)
+    if records:
+        df = pd.DataFrame(records)[
+            ["work_date", "category", "department", "name", "code", "memo", "updated_at"]
+        ]
+        df.columns = ["날짜", "구분", "부서/매장", "이름", "근태코드", "메모", "최종수정"]
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-    with tab2:
-        st.subheader("직원 계정 추가")
+        # 엑셀 다운로드
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="근태현황")
+        st.download_button(
+            "엑셀로 다운로드",
+            data=buf.getvalue(),
+            file_name=f"근태현황_{start.isoformat()}_{end.isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.info("해당 조건에 입력된 근태 내역이 없습니다.")
 
+
+# ---------------------------------------------------------------------------
+# 관리자용: 직원 계정 관리
+# ---------------------------------------------------------------------------
+def admin_accounts_view(user):
+    st.subheader("직원 계정 추가")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        add_category = st.selectbox("구분", db.CATEGORIES, key="add_user_category")
+    with c2:
+        add_org_options = db.get_org_units(add_category)
+        add_org_unit = st.selectbox(
+            "부서/매장", add_org_options, key=f"add_user_org_{add_category}"
+        )
+
+    with st.form("add_user_form"):
         c1, c2 = st.columns(2)
         with c1:
-            add_category = st.selectbox("구분", db.CATEGORIES, key="add_user_category")
+            new_username = st.text_input("아이디 (사번 등, 영문/숫자 권장)")
+            new_name = st.text_input("이름")
         with c2:
-            add_org_options = db.get_org_units(add_category)
-            add_org_unit = st.selectbox(
-                "부서/매장", add_org_options, key=f"add_user_org_{add_category}"
+            new_password = st.text_input("초기 비밀번호", type="password")
+        new_role = st.radio("권한", ["employee", "admin"], horizontal=True,
+                             format_func=lambda x: "일반 직원" if x == "employee" else "관리자")
+        submitted = st.form_submit_button("계정 생성", use_container_width=True)
+    if submitted:
+        if not new_username or not new_password or not new_name:
+            st.error("아이디, 이름, 초기 비밀번호는 필수입니다.")
+        else:
+            ok, msg = db.create_user(
+                new_username.strip(), new_password, new_name.strip(),
+                add_category, add_org_unit, new_role,
             )
-
-        with st.form("add_user_form"):
-            c1, c2 = st.columns(2)
-            with c1:
-                new_username = st.text_input("아이디 (사번 등, 영문/숫자 권장)")
-                new_name = st.text_input("이름")
-            with c2:
-                new_password = st.text_input("초기 비밀번호", type="password")
-            new_role = st.radio("권한", ["employee", "admin"], horizontal=True,
-                                 format_func=lambda x: "일반 직원" if x == "employee" else "관리자")
-            submitted = st.form_submit_button("계정 생성", use_container_width=True)
-        if submitted:
-            if not new_username or not new_password or not new_name:
-                st.error("아이디, 이름, 초기 비밀번호는 필수입니다.")
+            if ok:
+                st.success(f"{msg} ({add_category} · {add_org_unit})")
+                st.rerun()
             else:
-                ok, msg = db.create_user(
-                    new_username.strip(), new_password, new_name.strip(),
-                    add_category, add_org_unit, new_role,
+                st.error(msg)
+
+    st.divider()
+    with st.expander("엑셀로 직원 일괄 등록 (여러 명 한번에)"):
+        st.caption(
+            "70명을 한 명씩 등록하기 번거로우시면, 아래 양식에 맞춰 엑셀을 채워서 올리세요. "
+            "'구분'은 본사/직영/소사장 중 하나, '부서/매장'은 그 구분에 실제로 있는 이름과 정확히 같아야 해요."
+        )
+        st.download_button(
+            "빈 양식 다운로드 (예시 3줄 포함)",
+            data=_build_bulk_template(),
+            file_name="직원_일괄등록_양식.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="bulk_template_dl",
+        )
+
+        if "bulk_upload_key_n" not in st.session_state:
+            st.session_state["bulk_upload_key_n"] = 0
+
+        bulk_result = st.session_state.pop("bulk_register_result", None)
+        if bulk_result:
+            if bulk_result["success"]:
+                st.success(f"✅ {bulk_result['success']}명 등록 완료 — 직원 목록에 바로 반영됐어요.")
+            if bulk_result["failed"]:
+                st.error(f"실패 {len(bulk_result['failed'])}건")
+                st.dataframe(
+                    pd.DataFrame(bulk_result["failed"], columns=["아이디", "실패 사유"]),
+                    use_container_width=True, hide_index=True,
                 )
-                if ok:
-                    st.success(f"{msg} ({add_category} · {add_org_unit})")
-                    st.rerun()
+
+        uploaded = st.file_uploader(
+            "작성한 엑셀 파일 업로드 (.xlsx)", type=["xlsx"],
+            key=f"bulk_upload_file_{st.session_state['bulk_upload_key_n']}",
+        )
+        if uploaded is not None:
+            try:
+                in_df = pd.read_excel(uploaded, dtype=str).fillna("")
+            except Exception as e:
+                st.error(f"파일을 읽을 수 없습니다: {e}")
+                in_df = None
+
+            if in_df is not None:
+                required_cols = {"아이디", "이름", "구분", "부서/매장"}
+                if not required_cols.issubset(set(in_df.columns)):
+                    st.error(f"필수 열이 빠졌습니다. 필요한 열: {', '.join(sorted(required_cols))}")
                 else:
-                    st.error(msg)
+                    st.dataframe(in_df, use_container_width=True, hide_index=True)
+                    if st.button("일괄 등록 실행", key="bulk_register_btn", use_container_width=True):
+                        success, failed = [], []
+                        for _, row in in_df.iterrows():
+                            uname = str(row.get("아이디", "")).strip()
+                            name = str(row.get("이름", "")).strip()
+                            category = str(row.get("구분", "")).strip()
+                            org_unit = str(row.get("부서/매장", "")).strip()
+                            pw = str(row.get("초기비밀번호", "")).strip() or "changeme123"
+                            role = str(row.get("권한", "")).strip()
+                            role = role if role in ("employee", "admin") else "employee"
 
-        st.divider()
-        with st.expander("엑셀로 직원 일괄 등록 (여러 명 한번에)"):
-            st.caption(
-                "70명을 한 명씩 등록하기 번거로우시면, 아래 양식에 맞춰 엑셀을 채워서 올리세요. "
-                "'구분'은 본사/직영/소사장 중 하나, '부서/매장'은 그 구분에 실제로 있는 이름과 정확히 같아야 해요."
+                            if not uname or not name:
+                                failed.append((uname or "(빈값)", "아이디 또는 이름이 비어있음"))
+                                continue
+                            if category not in db.CATEGORIES:
+                                failed.append((uname, f"구분 '{category}'이 본사/직영/소사장 중 하나가 아님"))
+                                continue
+                            if org_unit not in db.get_org_units(category):
+                                failed.append((uname, f"'{category}'에 '{org_unit}' 부서/매장이 없음"))
+                                continue
+
+                            ok, msg = db.create_user(uname, pw, name, category, org_unit, role)
+                            (success if ok else failed).append(uname if ok else (uname, msg))
+
+                        st.session_state["bulk_register_result"] = {
+                            "success": len(success), "failed": failed,
+                        }
+                        st.session_state["bulk_upload_key_n"] += 1
+                        st.rerun()
+
+    st.divider()
+    st.subheader("직원 목록")
+    users = db.list_users()
+    udf = pd.DataFrame(users)
+    if not udf.empty:
+        udf_display = udf[["username", "name", "category", "department", "role"]].copy()
+        udf_display.columns = ["아이디", "이름", "구분", "부서/매장", "권한"]
+        st.dataframe(udf_display, use_container_width=True, hide_index=True)
+
+        with st.expander("복사하기 편한 텍스트로 보기"):
+            st.caption("이 표는 그림처럼 그려져서 Ctrl+C가 잘 안 먹혀요. 아래 상자 안 글자는 평범하게 드래그해서 복사하시면 돼요.")
+            lines = [
+                f"{u['username']}\t{u['name']}\t{u['category']}\t{u['department']}\t{u['role']}"
+                for u in users
+            ]
+            st.text_area(
+                "아이디 / 이름 / 구분 / 부서·매장 / 권한",
+                value="아이디\t이름\t구분\t부서/매장\t권한\n" + "\n".join(lines),
+                height=200, key="user_list_copy_text",
             )
-            st.download_button(
-                "빈 양식 다운로드 (예시 3줄 포함)",
-                data=_build_bulk_template(),
-                file_name="직원_일괄등록_양식.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="bulk_template_dl",
+
+        with st.expander("직원 정보 수정 / 계정 삭제"):
+            edit_target = st.selectbox(
+                "대상 직원",
+                users,
+                format_func=lambda u: f"{u['name']} ({u['username']}, {u['category']} · {u['department']})",
+                key="edit_target_select",
             )
 
-            if "bulk_upload_key_n" not in st.session_state:
-                st.session_state["bulk_upload_key_n"] = 0
-
-            bulk_result = st.session_state.pop("bulk_register_result", None)
-            if bulk_result:
-                if bulk_result["success"]:
-                    st.success(f"✅ {bulk_result['success']}명 등록 완료 — 직원 목록에 바로 반영됐어요.")
-                if bulk_result["failed"]:
-                    st.error(f"실패 {len(bulk_result['failed'])}건")
-                    st.dataframe(
-                        pd.DataFrame(bulk_result["failed"], columns=["아이디", "실패 사유"]),
-                        use_container_width=True, hide_index=True,
-                    )
-
-            uploaded = st.file_uploader(
-                "작성한 엑셀 파일 업로드 (.xlsx)", type=["xlsx"],
-                key=f"bulk_upload_file_{st.session_state['bulk_upload_key_n']}",
+            e_c1, e_c2 = st.columns(2)
+            with e_c1:
+                edit_name = st.text_input(
+                    "이름", value=edit_target["name"], key=f"edit_name_{edit_target['id']}"
+                )
+                edit_category = st.selectbox(
+                    "구분", db.CATEGORIES,
+                    index=db.CATEGORIES.index(edit_target["category"])
+                    if edit_target["category"] in db.CATEGORIES else 0,
+                    key=f"edit_category_{edit_target['id']}",
+                )
+            with e_c2:
+                edit_org_options = db.get_org_units(edit_category)
+                edit_department = st.selectbox(
+                    "부서/매장", edit_org_options,
+                    index=edit_org_options.index(edit_target["department"])
+                    if edit_target["department"] in edit_org_options else 0,
+                    key=f"edit_dept_{edit_target['id']}_{edit_category}",
+                )
+                edit_role = st.radio(
+                    "권한", ["employee", "admin"], horizontal=True,
+                    index=0 if edit_target["role"] == "employee" else 1,
+                    format_func=lambda x: "일반 직원" if x == "employee" else "관리자",
+                    key=f"edit_role_{edit_target['id']}",
+                )
+            edit_new_pw = st.text_input(
+                "새 비밀번호 (바꿀 때만 입력, 비워두면 기존 비밀번호 유지)",
+                type="password", key=f"edit_pw_{edit_target['id']}",
             )
-            if uploaded is not None:
-                try:
-                    in_df = pd.read_excel(uploaded, dtype=str).fillna("")
-                except Exception as e:
-                    st.error(f"파일을 읽을 수 없습니다: {e}")
-                    in_df = None
 
-                if in_df is not None:
-                    required_cols = {"아이디", "이름", "구분", "부서/매장"}
-                    if not required_cols.issubset(set(in_df.columns)):
-                        st.error(f"필수 열이 빠졌습니다. 필요한 열: {', '.join(sorted(required_cols))}")
-                    else:
-                        st.dataframe(in_df, use_container_width=True, hide_index=True)
-                        if st.button("일괄 등록 실행", key="bulk_register_btn", use_container_width=True):
-                            success, failed = [], []
-                            for _, row in in_df.iterrows():
-                                uname = str(row.get("아이디", "")).strip()
-                                name = str(row.get("이름", "")).strip()
-                                category = str(row.get("구분", "")).strip()
-                                org_unit = str(row.get("부서/매장", "")).strip()
-                                pw = str(row.get("초기비밀번호", "")).strip() or "changeme123"
-                                role = str(row.get("권한", "")).strip()
-                                role = role if role in ("employee", "admin") else "employee"
-
-                                if not uname or not name:
-                                    failed.append((uname or "(빈값)", "아이디 또는 이름이 비어있음"))
-                                    continue
-                                if category not in db.CATEGORIES:
-                                    failed.append((uname, f"구분 '{category}'이 본사/직영/소사장 중 하나가 아님"))
-                                    continue
-                                if org_unit not in db.get_org_units(category):
-                                    failed.append((uname, f"'{category}'에 '{org_unit}' 부서/매장이 없음"))
-                                    continue
-
-                                ok, msg = db.create_user(uname, pw, name, category, org_unit, role)
-                                (success if ok else failed).append(uname if ok else (uname, msg))
-
-                            st.session_state["bulk_register_result"] = {
-                                "success": len(success), "failed": failed,
-                            }
-                            st.session_state["bulk_upload_key_n"] += 1
-                            st.rerun()
-
-        st.divider()
-        st.subheader("직원 목록")
-        users = db.list_users()
-        udf = pd.DataFrame(users)
-        if not udf.empty:
-            udf_display = udf[["username", "name", "category", "department", "role"]].copy()
-            udf_display.columns = ["아이디", "이름", "구분", "부서/매장", "권한"]
-            st.dataframe(udf_display, use_container_width=True, hide_index=True)
-
-            with st.expander("복사하기 편한 텍스트로 보기"):
-                st.caption("이 표는 그림처럼 그려져서 Ctrl+C가 잘 안 먹혀요. 아래 상자 안 글자는 평범하게 드래그해서 복사하시면 돼요.")
-                lines = [
-                    f"{u['username']}\t{u['name']}\t{u['category']}\t{u['department']}\t{u['role']}"
-                    for u in users
-                ]
-                st.text_area(
-                    "아이디 / 이름 / 구분 / 부서·매장 / 권한",
-                    value="아이디\t이름\t구분\t부서/매장\t권한\n" + "\n".join(lines),
-                    height=200, key="user_list_copy_text",
+            if st.button("수정 저장", key=f"edit_save_{edit_target['id']}", use_container_width=True):
+                db.update_user(
+                    edit_target["id"], edit_name.strip(), edit_category, edit_department,
+                    edit_role, edit_new_pw or None,
                 )
+                st.success(f"{edit_name} 계정 정보가 수정되었습니다.")
+                st.rerun()
 
-            with st.expander("직원 정보 수정 / 계정 삭제"):
-                edit_target = st.selectbox(
-                    "대상 직원",
-                    users,
-                    format_func=lambda u: f"{u['name']} ({u['username']}, {u['category']} · {u['department']})",
-                    key="edit_target_select",
-                )
-
-                e_c1, e_c2 = st.columns(2)
-                with e_c1:
-                    edit_name = st.text_input(
-                        "이름", value=edit_target["name"], key=f"edit_name_{edit_target['id']}"
-                    )
-                    edit_category = st.selectbox(
-                        "구분", db.CATEGORIES,
-                        index=db.CATEGORIES.index(edit_target["category"])
-                        if edit_target["category"] in db.CATEGORIES else 0,
-                        key=f"edit_category_{edit_target['id']}",
-                    )
-                with e_c2:
-                    edit_org_options = db.get_org_units(edit_category)
-                    edit_department = st.selectbox(
-                        "부서/매장", edit_org_options,
-                        index=edit_org_options.index(edit_target["department"])
-                        if edit_target["department"] in edit_org_options else 0,
-                        key=f"edit_dept_{edit_target['id']}_{edit_category}",
-                    )
-                    edit_role = st.radio(
-                        "권한", ["employee", "admin"], horizontal=True,
-                        index=0 if edit_target["role"] == "employee" else 1,
-                        format_func=lambda x: "일반 직원" if x == "employee" else "관리자",
-                        key=f"edit_role_{edit_target['id']}",
-                    )
-                edit_new_pw = st.text_input(
-                    "새 비밀번호 (바꿀 때만 입력, 비워두면 기존 비밀번호 유지)",
-                    type="password", key=f"edit_pw_{edit_target['id']}",
-                )
-
-                if st.button("수정 저장", key=f"edit_save_{edit_target['id']}", use_container_width=True):
-                    db.update_user(
-                        edit_target["id"], edit_name.strip(), edit_category, edit_department,
-                        edit_role, edit_new_pw or None,
-                    )
-                    st.success(f"{edit_name} 계정 정보가 수정되었습니다.")
+            st.divider()
+            confirm_del = st.checkbox(
+                "정말 삭제할게요 (근태 입력 내역도 함께 삭제되며, 되돌릴 수 없어요)",
+                key=f"confirm_del_{edit_target['id']}",
+            )
+            if st.button(
+                "계정 완전 삭제", key=f"edit_del_{edit_target['id']}",
+                type="secondary", use_container_width=True, disabled=not confirm_del,
+            ):
+                if edit_target["username"] == "admin":
+                    st.error("기본 admin 계정은 삭제할 수 없습니다.")
+                else:
+                    db.delete_user(edit_target["id"])
+                    st.success(f"{edit_target['name']} 계정이 완전히 삭제되었습니다.")
                     st.rerun()
 
-                st.divider()
-                confirm_del = st.checkbox(
-                    "정말 삭제할게요 (근태 입력 내역도 함께 삭제되며, 되돌릴 수 없어요)",
-                    key=f"confirm_del_{edit_target['id']}",
-                )
-                if st.button(
-                    "계정 완전 삭제", key=f"edit_del_{edit_target['id']}",
-                    type="secondary", use_container_width=True, disabled=not confirm_del,
-                ):
-                    if edit_target["username"] == "admin":
-                        st.error("기본 admin 계정은 삭제할 수 없습니다.")
-                    else:
-                        db.delete_user(edit_target["id"])
-                        st.success(f"{edit_target['name']} 계정이 완전히 삭제되었습니다.")
-                        st.rerun()
-
-            with st.expander("계정 비활성화(퇴사 처리)"):
-                target = st.selectbox(
-                    "비활성화할 직원",
-                    users,
-                    format_func=lambda u: f"{u['name']} ({u['username']}, {u['category']} · {u['department']})",
-                    key="deactivate_target_select",
-                )
-                if st.button("선택한 계정 비활성화", type="secondary", key="deactivate_btn"):
-                    if target["username"] == "admin":
-                        st.error("기본 admin 계정은 비활성화할 수 없습니다.")
-                    else:
-                        db.deactivate_user(target["id"])
-                        st.success(f"{target['name']} 계정이 비활성화되었습니다.")
-                        st.rerun()
-
-            with st.expander("비활성화된 계정 되살리기"):
-                inactive_users = [u for u in db.list_users(include_inactive=True) if u["active"] == 0]
-                if not inactive_users:
-                    st.caption("비활성화된 계정이 없습니다.")
+        with st.expander("계정 비활성화(퇴사 처리)"):
+            target = st.selectbox(
+                "비활성화할 직원",
+                users,
+                format_func=lambda u: f"{u['name']} ({u['username']}, {u['category']} · {u['department']})",
+                key="deactivate_target_select",
+            )
+            if st.button("선택한 계정 비활성화", type="secondary", key="deactivate_btn"):
+                if target["username"] == "admin":
+                    st.error("기본 admin 계정은 비활성화할 수 없습니다.")
                 else:
-                    revive_target = st.selectbox(
-                        "되살릴 직원",
-                        inactive_users,
-                        format_func=lambda u: f"{u['name']} ({u['username']}, {u['category']} · {u['department']})",
-                        key="revive_target_select",
-                    )
-                    if st.button("선택한 계정 되살리기", key="revive_btn", use_container_width=True):
-                        db.activate_user(revive_target["id"])
-                        st.success(f"{revive_target['name']} 계정이 다시 활성화되었습니다.")
-                        st.rerun()
+                    db.deactivate_user(target["id"])
+                    st.success(f"{target['name']} 계정이 비활성화되었습니다.")
+                    st.rerun()
+
+        with st.expander("비활성화된 계정 되살리기"):
+            inactive_users = [u for u in db.list_users(include_inactive=True) if u["active"] == 0]
+            if not inactive_users:
+                st.caption("비활성화된 계정이 없습니다.")
+            else:
+                revive_target = st.selectbox(
+                    "되살릴 직원",
+                    inactive_users,
+                    format_func=lambda u: f"{u['name']} ({u['username']}, {u['category']} · {u['department']})",
+                    key="revive_target_select",
+                )
+                if st.button("선택한 계정 되살리기", key="revive_btn", use_container_width=True):
+                    db.activate_user(revive_target["id"])
+                    st.success(f"{revive_target['name']} 계정이 다시 활성화되었습니다.")
+                    st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -1175,35 +1104,25 @@ def main():
     st.title("🗂️ (주)대교통신 HR 플랫폼")
 
     if user["role"] == "admin":
-        tab_emp, tab_bulk, tab_notice, tab_docs, tab_onboard, tab_admin = st.tabs(
-            ["내 근태입력", "일괄입력", "공지사항", "문서함", "온보딩", "관리자"]
+        tab_bulk, tab_emp, tab_status, tab_kakao, tab_admin = st.tabs(
+            ["근태일괄입력", "근태개별입력", "전체 근태현황", "카톡 근태 가져오기", "직원 계정관리"]
         )
-        with tab_emp:
-            employee_view(user)
         with tab_bulk:
             bulk_entry_view(user)
-        with tab_notice:
-            announcements_view(user)
-        with tab_docs:
-            documents_view("규정", "아직 등록된 규정 문서가 없습니다. GitHub 저장소의 docs/규정 폴더에 파일을 올려주세요.")
-        with tab_onboard:
-            documents_view("온보딩", "아직 등록된 온보딩 자료가 없습니다. GitHub 저장소의 docs/온보딩 폴더에 파일을 올려주세요.")
+        with tab_emp:
+            employee_view(user)
+        with tab_status:
+            admin_status_view(user)
+        with tab_kakao:
+            kakao_import_view(user)
         with tab_admin:
-            admin_view(user)
+            admin_accounts_view(user)
     else:
-        tab_emp, tab_bulk, tab_notice, tab_docs, tab_onboard = st.tabs(
-            ["내 근태입력", "일괄입력", "공지사항", "문서함", "온보딩"]
-        )
-        with tab_emp:
-            employee_view(user)
+        tab_bulk, tab_emp = st.tabs(["근태일괄입력", "근태개별입력"])
         with tab_bulk:
             bulk_entry_view(user)
-        with tab_notice:
-            announcements_view(user)
-        with tab_docs:
-            documents_view("규정", "아직 등록된 규정 문서가 없습니다.")
-        with tab_onboard:
-            documents_view("온보딩", "아직 등록된 온보딩 자료가 없습니다.")
+        with tab_emp:
+            employee_view(user)
 
 
 if __name__ == "__main__":
