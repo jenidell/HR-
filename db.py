@@ -236,6 +236,17 @@ def deactivate_user(user_id: int):
     conn.close()
 
 
+def delete_attendance(user_id: int, work_date: str):
+    """특정 직원의 특정 날짜 근태 입력을 삭제 (잘못 입력한 경우 등)"""
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM attendance WHERE user_id = ? AND work_date = ?",
+        (user_id, work_date),
+    )
+    conn.commit()
+    conn.close()
+
+
 def upsert_attendance(user_id: int, work_date: str, code: str, memo: str = ""):
     """같은 사람/같은 날짜면 덮어쓰기 (수정), 아니면 새로 입력"""
     conn = get_conn()
