@@ -129,6 +129,14 @@ def init_db():
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
     # 예전 버전(구조 변경 전) DB에는 category 컬럼이 없을 수 있어 마이그레이션
@@ -427,6 +435,26 @@ def get_attendance_records_for_matrix(category: str, start_date: str, end_date: 
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_setting(key: str, default: str = None):
+    """앱 설정값(예: 탭 순서) 조회. 없으면 default 반환."""
+    conn = get_conn()
+    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    conn.close()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value: str):
+    """앱 설정값 저장(있으면 덮어쓰기)."""
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_all_attendance(start_date: str = None, end_date: str = None, category: str = None, org_unit: str = None):
