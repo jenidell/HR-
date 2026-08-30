@@ -65,148 +65,148 @@ def employee_view(user):
             memo = st.text_input("메모 (선택)", placeholder="예: 오전 반차, 결혼식 참석 등")
             submitted = st.form_submit_button("입력/수정 저장", use_container_width=True)
         if submitted:
- db.upert_attendance(user["id"), work_date.isoformat (), 코드, 메모)
- st.success(f"{work_date.isoformat ()} 근태가 '{code}'(으) 로 저장되었습니다)")
- 세인트 rerun()
+            db.upsert_attendance(user["id"], work_date.isoformat(), code, memo)
+            st.success(f"{work_date.isoformat()} 근태가 '{code}'(으)로 저장되었습니다.")
+            st.rerun()
 
- col2와 함께:
- 세인트 마크다운 ("**근태 코드 안내**)
- 세인트 caption(
- "정상출근 · 연차 · 반차 · 지각 · 조퇴 · 특근 · 당직 · 교육 · "
- "경조 · 예비군 · 무급 · 개인용무 · 휴무 · 기타\n\n"
- "같은 날짜에 다시 입력하면 기존 내용을 덮어씁니다(수정)."
- )
+    with col2:
+        st.markdown("**근태 코드 안내**")
+        st.caption(
+            "정상출근 · 연차 · 반차 · 지각 · 조퇴 · 특근 · 당직 · 교육 · "
+            "경조 · 예비군 · 무급 · 개인용무 · 휴무 · 기타\n\n"
+            "같은 날짜에 다시 입력하면 기존 내용을 덮어씁니다(수정)."
+        )
 
- 세인트디바이더 ()
- 세인트 서브헤더 ("내 최근 입력 내역")
+    st.divider()
+    st.subheader("내 최근 입력 내역")
 
- default_start = 날짜.오늘 () - 시간 델타(일수=30)
- c1, c2 = st.columns(2)
- c1과 함께:
- 시작 = st.date_input ("조회 시작일", 값=default_start, key="emp_start")
- c2와 함께:
- 끝 = st.date_input ("조회 종료일", 값 = 날짜.오늘 (), 키="emp_end")
+    default_start = date.today() - timedelta(days=30)
+    c1, c2 = st.columns(2)
+    with c1:
+        start = st.date_input("조회 시작일", value=default_start, key="emp_start")
+    with c2:
+        end = st.date_input("조회 종료일", value=date.today(), key="emp_end")
 
- 레코드 = db.get_user_attendance(user["id"), start.isoformat (), end.isoformat ())
- 기록된 경우:
- df = pd.데이터프레임(기록)[["work_date", "code", "memo", "updated_at"]
- df.columns = ["날짜", "근태코드", "메모", "최종수정"]
- st.dataframe(df, use_container_width=True, hide_index=True)
- 그렇지 않으면:
- st.info("해당 기간에 입력된 근태 내역이 없습니다.")
+    records = db.get_user_attendance(user["id"], start.isoformat(), end.isoformat())
+    if records:
+        df = pd.DataFrame(records)[["work_date", "code", "memo", "updated_at"]]
+        df.columns = ["날짜", "근태코드", "메모", "최종수정"]
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.info("해당 기간에 입력된 근태 내역이 없습니다.")
 
 
 # ---------------------------------------------------------------------------
 # 관리자용: 전체 현황 + 계정 관리
 # ---------------------------------------------------------------------------
-def admin_view(사용자):
- tab1, tab2 = st.tabs(["전체 근태 현황", "직원 계정 관리"])
+def admin_view(user):
+    tab1, tab2 = st.tabs(["전체 근태 현황", "직원 계정 관리"])
 
- 탭1:
- 세인트 서브헤더 ("전체 근태 현황")
- c1, c2, c3 = st.columns(3)
- c1과 함께:
- 시작 = st.date_input(
- "조회 시작일", 값=날짜.오늘 ().replace(day=1), key="admin_start"
- )
- c2와 함께:
- 끝 = st.date_input ("조회 종료일", 값 = 날짜.오늘 (), 키="admin_end")
- c3와 함께:
- = st.selectbox ("부서, ["전체"] + db.부서, key="admin_dep")
+    with tab1:
+        st.subheader("전체 근태 현황")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            start = st.date_input(
+                "조회 시작일", value=date.today().replace(day=1), key="admin_start"
+            )
+        with c2:
+            end = st.date_input("조회 종료일", value=date.today(), key="admin_end")
+        with c3:
+            dept = st.selectbox("부서", ["전체"] + db.DEPARTMENTS, key="admin_dept")
 
- 레코드 = db.get_all_attendance (start.isoformat (), end.isoformat (), dep)
- 기록된 경우:
- df = pd.데이터프레임(기록)[
- ["work_date", "부서", "이름", "코드", "memo", "updated_at"]
- ]
- df.columns = ["날짜", "부서", "이름", "근태코드", "메모", "최종수정"]
- st.dataframe(df, use_container_width=True, hide_index=True)
+        records = db.get_all_attendance(start.isoformat(), end.isoformat(), dept)
+        if records:
+            df = pd.DataFrame(records)[
+                ["work_date", "department", "name", "code", "memo", "updated_at"]
+            ]
+            df.columns = ["날짜", "부서", "이름", "근태코드", "메모", "최종수정"]
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
- # 엑셀 다운로드
- buf = IO.바이트IO()
- PD와 함께.ExcelWriter(buf, engine="openpyxl") 작성자:
- df.to _excel(작가, 인덱스=false, 시트_name="근태현황")
- st. download_버튼(
- "엑셀로 다운로드",
- data=buf.getvalue (),
- file_name=f"근태현황_{start.isoformat ()}_{end.isoformat ()}.xlsx",
- mime="application/vnd.openxmlformats-officeddocument.spreadsheetml.".시트",
- )
- 그렇지 않으면:
- st.info("해당 조건에 입력된 근태 내역이 없습니다.")
+            # 엑셀 다운로드
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False, sheet_name="근태현황")
+            st.download_button(
+                "엑셀로 다운로드",
+                data=buf.getvalue(),
+                file_name=f"근태현황_{start.isoformat()}_{end.isoformat()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        else:
+            st.info("해당 조건에 입력된 근태 내역이 없습니다.")
 
- 탭2:
- 세인트 서브헤더 ("직원 계정 추가")
- st.form ("add_user_form 포함):
- c1, c2 = st.columns(2)
- c1과 함께:
- new_username = st.text_input ("아이디 (사번 등, 영문/숫자 권장))"
- new_name = st.text_input ("이름")
- c2와 함께:
- new_password = st.text_input ("초기 비밀번호", type="password")
- new_dep = st.selectbox ("부서", db.부서)
- new_role = st.radio ("권한, ["employee", "admin"], 가로=맞아요,
- format_func=lambda x: x == "employee"이 아닌 경우 "일반 직원")
- 제출된 = st.form_submit_button ("계정 생성", use_container_width=True)
- 제출된 경우:
- new_username 또는 new_password 또는 new_name이 아닌 경우:
- st.error("아이디, 이름, 초기 비밀번호는 필수입니다.")
- 그렇지 않으면:
- 알겠습니다, msg = db.create_user(
- new_username.strip (), new_password, new_name.strip (), new_dep, new_role
- )
- 괜찮으시다면:
- st.success(msg)
- 세인트 rerun()
- 그렇지 않으면:
- st.error(msg)
+    with tab2:
+        st.subheader("직원 계정 추가")
+        with st.form("add_user_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                new_username = st.text_input("아이디 (사번 등, 영문/숫자 권장)")
+                new_name = st.text_input("이름")
+            with c2:
+                new_password = st.text_input("초기 비밀번호", type="password")
+                new_dept = st.selectbox("부서", db.DEPARTMENTS)
+            new_role = st.radio("권한", ["employee", "admin"], horizontal=True,
+                                 format_func=lambda x: "일반 직원" if x == "employee" else "관리자")
+            submitted = st.form_submit_button("계정 생성", use_container_width=True)
+        if submitted:
+            if not new_username or not new_password or not new_name:
+                st.error("아이디, 이름, 초기 비밀번호는 필수입니다.")
+            else:
+                ok, msg = db.create_user(
+                    new_username.strip(), new_password, new_name.strip(), new_dept, new_role
+                )
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
 
- 세인트디바이더 ()
- 세인트 서브헤더 ("직원 목록")
- 사용자 = db.list_users ()
- udf = pd.데이터프레임(사용자)
- udf.empty가 아니라면:
- udf_display = udf [[ "username", "이름", "부서", "역할"].copy ()
- udf_display.columns = ["아이디", "이름", "부서", "권한"]
- st.dataframe(udf_display, use_container_width=True, hide_index=True)
+        st.divider()
+        st.subheader("직원 목록")
+        users = db.list_users()
+        udf = pd.DataFrame(users)
+        if not udf.empty:
+            udf_display = udf[["username", "name", "department", "role"]].copy()
+            udf_display.columns = ["아이디", "이름", "부서", "권한"]
+            st.dataframe(udf_display, use_container_width=True, hide_index=True)
 
- with st.expander("계정 비활성화(퇴사 처리)"):
- 대상 = st.selectbox(
- "비활성화할 직원",
- 사용자,
- format_func=lambda u: f"{u['이름]}({u['username'], {u['부서]})",
- )
- st.button ("선택한 계정 비활성화", type="secondary":
- target["username"] == "admin"인 경우:
- st.error("기본 admin 계정은 비활성화할 수 없습니다.")
- 그렇지 않으면:
- db.deactivate_user(target["id"])
- st.success(f"{target[이름]} 계정이 비활성화되었습니다.")
- 세인트 rerun()
+            with st.expander("계정 비활성화(퇴사 처리)"):
+                target = st.selectbox(
+                    "비활성화할 직원",
+                    users,
+                    format_func=lambda u: f"{u['name']} ({u['username']}, {u['department']})",
+                )
+                if st.button("선택한 계정 비활성화", type="secondary"):
+                    if target["username"] == "admin":
+                        st.error("기본 admin 계정은 비활성화할 수 없습니다.")
+                    else:
+                        db.deactivate_user(target["id"])
+                        st.success(f"{target['name']} 계정이 비활성화되었습니다.")
+                        st.rerun()
 
 
 # ---------------------------------------------------------------------------
 # 메인
 # ---------------------------------------------------------------------------
-주 () 정의:
- "사용자"가 st.session_state에 있지 않은 경우:
- login_view ()
- 돌아가다
+def main():
+    if "user" not in st.session_state:
+        login_view()
+        return
 
- 사용자 = st.session_state["사용자"]
- 로그아웃_버튼()
+    user = st.session_state["user"]
+    logout_button()
 
- st.title("🗂️ 대교통신 HR 플랫폼")
+    st.title("🗂️ 대교통신 HR 플랫폼")
 
- 사용자 ["역할"] == "관리자"인 경우:
- tab_emp, tab_admin = st. tabs(["내 근태입력", "관리자"])
- tab_emp와 함께:
- 직원_view(사용자)
- tab_admin과 함께:
- admin_view(사용자)
- 그렇지 않으면:
- 직원_view(사용자)
+    if user["role"] == "admin":
+        tab_emp, tab_admin = st.tabs(["내 근태입력", "관리자"])
+        with tab_emp:
+            employee_view(user)
+        with tab_admin:
+            admin_view(user)
+    else:
+        employee_view(user)
 
 
-__name__ == "__main__"인 경우:
- 주된()
+if __name__ == "__main__":
+    main()
