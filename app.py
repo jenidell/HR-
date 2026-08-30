@@ -11,7 +11,7 @@
 import io
 import re
 from calendar import Calendar
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -216,7 +216,7 @@ def bulk_entry_view(user):
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     NOT_SELECTED = "─ 선택 안 함 ─"
-    BULK_CODE_OPTIONS = [NOT_SELECTED] + db.ATTENDANCE_CODES
+    BULK_CODE_OPTIONS = [NOT_SELECTED] + db.get_attendance_codes()
 
     with st.form("bulk_attendance_form"):
         entries = {}
@@ -225,7 +225,7 @@ def bulk_entry_view(user):
             prev = existing.get(m["id"], {})
             prev_code = prev.get("code", "")
             prev_memo = prev.get("memo", "")
-            code_idx = BULK_CODE_OPTIONS.index(prev_code) if has_prev and prev_code in db.ATTENDANCE_CODES else 0
+            code_idx = BULK_CODE_OPTIONS.index(prev_code) if has_prev and prev_code in BULK_CODE_OPTIONS else 0
 
             col_name, col_code, col_memo = st.columns([2, 2, 3])
             with col_name:
@@ -279,6 +279,10 @@ _KAKAO_STATUS_MAP = {
     "휴가": "휴가",
     "오전반차": "반차",
     "오후반차": "반차",
+    "대체휴무": "대체휴무",
+    "대체오후반차": "대체오후반차",
+    "대체 휴무": "대체휴무",
+    "대체 오후반차": "대체오후반차",
     "지각": "지각",
     "조퇴": "조퇴",
     "특근": "특근",
@@ -290,6 +294,18 @@ _KAKAO_STATUS_MAP = {
     "개인용무": "개인용무",
     "휴무": "휴무",
 }
+
+def _resolve_status(status_text):
+    """카톡에 적힌 상태 글자를 근태 코드로 바꿉니다.
+    기본 표(_KAKAO_STATUS_MAP)에 없어도, 화면에서 직접 추가한 항목이면 그대로 인정합니다."""
+    status_text = str(status_text or "").strip()
+    code = _KAKAO_STATUS_MAP.get(status_text)
+    if code:
+        return code
+    if status_text and status_text in db.get_attendance_codes():
+        return status_text
+    return None
+
 
 _DATE_DIVIDER_RE = re.compile(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일")
 
@@ -317,10 +333,12 @@ def parse_headquarters_chat(text, fallback_date):
     반환값: (인식된 근태 목록, 확인이 필요할 수도 있는 줄 목록)"""
     header_re = re.compile(r"(\d{1,2})월\s*(\d{1,2})일?.*?(?:출근현황|근태)")
     name_status_re = re.compile(r"^\s*-?\s*([가-힣A-Za-z0-9]+)\s*[:：]\s*(.+?)\s*$")
+    dept_re = re.compile(r"([가-힣]{1,6}팀)")
 
     results = []
     unrecognized = []
     current_date = fallback_date
+    current_dept = ""
     for raw in text.splitlines():
         line = _strip_kakao_prefix(raw)
         if not line or _EXPORT_METADATA_RE.search(line):
@@ -339,13 +357,20 @@ def parse_headquarters_chat(text, fallback_date):
                 current_date = date(current_date.year, month, day)
             except ValueError:
                 pass
+            # "8월 29일 (토) 재고팀 출근현황" 처럼 헤더에 팀 이름이 붙어 있으면 기억해둠
+            # (직원 자동 등록할 때 부서를 채우는 데 씀)
+            dm2 = dept_re.search(line)
+            current_dept = dm2.group(1) if dm2 else ""
             continue
         nm = name_status_re.match(line)
         if nm:
             name, status_text = nm.group(1), nm.group(2).strip()
-            code = _KAKAO_STATUS_MAP.get(status_text)
+            code = _resolve_status(status_text)
+            # 본사는 주말(토·일) 출근을 '당직'으로 봅니다 (2026-08-30 확인).
+            if code == "정상출근" and current_date and current_date.weekday() >= 5:
+                code = "당직"
             results.append({
-                "raw": line, "name": name, "store": None,
+                "raw": line, "name": name, "store": None, "dept": current_dept,
                 "work_date": current_date, "code": code or "기타",
                 "memo": _STATUS_TIME_MEMO.get(status_text, "" if code else status_text),
             })
@@ -385,8 +410,8 @@ def parse_jikyeong_chat(text, fallback_date):
                     i += 1
             while i < len(lines) and not end_re.match(lines[i]) and not report_start_re.match(lines[i]):
                 parts = lines[i].split()
-                if parts and parts[0] in _KAKAO_STATUS_MAP:
-                    code = _KAKAO_STATUS_MAP[parts[0]]
+                if parts and _resolve_status(parts[0]):
+                    code = _resolve_status(parts[0])
                     for nm in parts[1:]:
                         block[nm] = code
                 elif lines[i] and _MAYBE_ATTENDANCE_RE.search(lines[i]):
@@ -607,8 +632,121 @@ def kakao_calendar_view(user):
     _kakao_calendar_view(category, int(target_year), int(target_month))
 
 
+def _add_code_buttons(unknown):
+    """'근태 항목에 없는 표현' 바로 아래에서 그 자리에서 정식 항목으로 추가할 수 있게 합니다.
+    (저한테 따로 말씀하실 필요 없이 여기서 누르시면 돼요.)"""
+    with st.expander("➕ 자주 쓰는 표현이면 여기서 근태 항목으로 추가하세요", expanded=True):
+        st.caption(
+            "누르면 근태 항목 목록에 바로 들어가고, 지금 미리보기의 '기타'도 그 항목으로 바뀝니다. "
+            "한 번 추가하면 다음부터 계속 인식돼요."
+        )
+        # 링크 주소나 파일 이름처럼 근태가 아닌 게 섞여 있으니, 짧고 한글인 것만 버튼으로 제안
+        candidates = [
+            k for k in sorted(unknown, key=lambda x: -unknown[x])
+            if len(k) <= 10 and re.fullmatch(r"[가-힣A-Za-z0-9()/~ ]+", k)
+        ]
+        if candidates:
+            cols = st.columns(min(3, len(candidates)))
+            for i, kw in enumerate(candidates[:9]):
+                if cols[i % len(cols)].button(
+                    f"➕ {kw} ({unknown[kw]}건)", key=f"addcode_{kw}", use_container_width=True
+                ):
+                    db.add_attendance_code(kw)
+                    for r in st.session_state.get("kakao_parsed") or []:
+                        if r.get("code") == "기타" and str(r.get("memo") or "").strip() == kw:
+                            r["code"], r["memo"] = kw, ""
+                    st.session_state["kk_added_code"] = kw
+                    st.rerun()
+
+        typed = st.text_input(
+            "직접 입력해서 추가하기", key="addcode_manual",
+            placeholder="예: 대체휴무",
+        )
+        if st.button("추가", key="addcode_manual_btn"):
+            kw = typed.strip()
+            if not kw:
+                st.warning("추가할 표현을 적어주세요.")
+            else:
+                db.add_attendance_code(kw)
+                for r in st.session_state.get("kakao_parsed") or []:
+                    if r.get("code") == "기타" and str(r.get("memo") or "").strip() == kw:
+                        r["code"], r["memo"] = kw, ""
+                st.session_state["kk_added_code"] = kw
+                st.rerun()
+
+
+def _safe_username(base, taken):
+    """아이디로 쓸 수 있게 다듬고, 이미 쓰는 아이디면 뒤에 숫자를 붙입니다."""
+    base = re.sub(r"[^가-힣A-Za-z0-9]", "", str(base or "")).strip() or "emp"
+    name = base
+    n = 2
+    while name in taken:
+        name = f"{base}{n}"
+        n += 1
+    taken.add(name)
+    return name
+
+
+def _register_from_kakao_button(category, parsed, unmatched_idx, emp_names):
+    """카톡에 나왔는데 아직 계정이 없는 사람을 한 번에 직원으로 등록해줍니다.
+    앱이 재시작되면서 명단이 날아갔을 때 되살리는 용도로도 씁니다."""
+    if category == "소사장":
+        return  # 소사장은 사람이 아니라 매장 단위라 자동 등록 대상이 아님
+
+    org_units = db.get_org_units(category) or ["기타"]
+    default_org = "기타" if "기타" in org_units else org_units[0]
+
+    # 이름별로 카톡에 나온 부서/매장을 모음 (본사는 헤더의 '○○팀', 직영은 매장명)
+    new_names = {}
+    for i in unmatched_idx:
+        row = parsed[i]
+        nm = str(row.get("name") or "").strip()
+        if not nm or nm in emp_names:
+            continue
+        hint = str(row.get("dept") or row.get("store") or "").strip()
+        if nm not in new_names or (not new_names[nm] and hint):
+            new_names[nm] = hint if hint in org_units else ""
+
+    if not new_names:
+        return
+
+    st.info(
+        f"카톡에 나왔는데 계정이 없는 사람이 **{len(new_names)}명**이에요 — "
+        + ", ".join(list(new_names)[:12])
+        + (f" 외 {len(new_names) - 12}명" if len(new_names) > 12 else "")
+    )
+    if st.button(
+        f"↩️ 이 {len(new_names)}명을 직원으로 한 번에 등록하기",
+        key="kk_bulk_register", use_container_width=True,
+        help="카톡에 적힌 이름 그대로 계정을 만들어요. 부서/매장은 나중에 직원 계정관리에서 고칠 수 있어요.",
+    ):
+        taken = {u["username"] for u in db.list_users(include_inactive=True)}
+        made, failed = 0, []
+        for nm, org in new_names.items():
+            ok, msg = db.create_user(
+                _safe_username(nm, taken), "changeme123", nm,
+                category, org or default_org, "employee",
+            )
+            if ok:
+                made += 1
+            else:
+                failed.append(f"{nm}({msg})")
+        st.session_state["kk_register_result"] = (made, failed)
+        st.rerun()
+
+
 def kakao_import_view(user):
     st.subheader("카톡 근태 가져오기")
+    added = st.session_state.pop("kk_added_code", None)
+    if added:
+        st.success(f"✅ '{added}' 를 근태 항목으로 추가했어요. 앞으로는 자동으로 인식됩니다.")
+    reg = st.session_state.pop("kk_register_result", None)
+    if reg:
+        made, failed = reg
+        if made:
+            st.success(f"✅ {made}명 등록했어요. 아래 미리보기에서 매칭이 채워졌는지 확인해주세요.")
+        if failed:
+            st.error("등록 실패: " + ", ".join(failed))
     st.caption(
         "카톡방(본사/직영/소사장)에서 '대화 내보내기'로 받은 .txt 파일을 통째로 올리면, 그중 아래에서 고른 "
         "달(월)의 근태만 걸러서 정리해드려요. 확인하고 저장하면 '근태표 양식 엑셀 다운로드'에도 바로 반영돼요. "
@@ -711,9 +849,9 @@ def kakao_import_view(user):
                               sorted(unknown.items(), key=lambda x: -x[1]))
             st.warning(
                 f"⚠️ 근태 항목에 없는 표현이 있어요 — {items}\n\n"
-                "이대로 저장하면 엑셀에 `기타(휴가)`처럼 원문을 괄호로 남겨드려요. "
-                "자주 쓰는 표현이면 정식 항목으로 추가해드릴 테니 알려주세요."
+                "이대로 저장하면 엑셀에 `기타(휴가)`처럼 원문을 괄호로 남겨드려요."
             )
+            _add_code_buttons(unknown)
 
         matches = [_auto_match(r) for r in parsed]
         unmatched_idx = [i for i, m in enumerate(matches) if m is None]
@@ -728,6 +866,12 @@ def kakao_import_view(user):
                 f"⚠️ 직원을 자동으로 못 찾은 항목이 {len(unmatched_idx)}건 있어요. "
                 "이름 오타이거나, 계정이 아직 등록되지 않은 사람일 수 있어요."
             )
+            if not cat_employees:
+                st.error(
+                    f"지금 '{category}'에 등록된 직원이 **한 명도 없어요.** "
+                    "그래서 전부 매칭이 안 됩니다. 아래 버튼으로 카톡에 나온 이름을 그대로 등록하시면 돼요."
+                )
+            _register_from_kakao_button(category, parsed, unmatched_idx, emp_names)
             only_unmatched = st.checkbox(
                 f"매칭 안 된 {len(unmatched_idx)}건만 보기",
                 key="kk_only_unmatched",
@@ -756,9 +900,10 @@ def kakao_import_view(user):
                             "직원", options, index=default_idx, key=f"kk_emp_{idx}", label_visibility="collapsed"
                         )
                     with c3:
-                        code_default = row["code"] if row["code"] in db.ATTENDANCE_CODES else "기타"
+                        _all_codes = db.get_attendance_codes()
+                        code_default = row["code"] if row["code"] in _all_codes else "기타"
                         st.selectbox(
-                            "근태코드", db.ATTENDANCE_CODES, index=db.ATTENDANCE_CODES.index(code_default),
+                            "근태코드", _all_codes, index=_all_codes.index(code_default),
                             key=f"kk_code_{idx}", label_visibility="collapsed",
                         )
                     with c4:
@@ -870,6 +1015,69 @@ def admin_status_view(user):
 # ---------------------------------------------------------------------------
 # 관리자용: 직원 계정 관리
 # ---------------------------------------------------------------------------
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def _backup_restore_view():
+    """
+    Streamlit Community Cloud는 앱이 재시작되면(파일 업로드·Reboot·일정 시간 미사용)
+    컨테이너를 새로 만들기 때문에 그 안에 있는 hr_platform.db 파일이 통째로 사라집니다.
+    영구 저장소로 옮기기 전까지, 백업 파일을 내려받아 두었다가 복원할 수 있게 해둡니다.
+    """
+    st.error(
+        "⚠️ **중요 — 지금은 앱이 재시작되면 저장한 근태·직원 명단이 모두 사라집니다.**\n\n"
+        "GitHub에 파일을 올리거나 Reboot를 하면 그때마다 초기화돼요. "
+        "**작업이 끝날 때마다 아래 '백업 파일 내려받기'를 누르고, "
+        "데이터가 비어 있으면 그 파일로 복원**해주세요."
+    )
+
+    with st.expander("💾 백업 / 복원", expanded=True):
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**1) 백업 파일 내려받기**")
+            try:
+                with open(db.DB_PATH, "rb") as f:
+                    blob = f.read()
+                users_n = len(db.list_users(include_inactive=True))
+                recs_n = len(db.get_all_attendance())
+                st.caption(f"현재 직원 {users_n}명 · 근태 {recs_n}건 ({len(blob) // 1024:,} KB)")
+                st.download_button(
+                    "💾 백업 파일 내려받기",
+                    data=blob,
+                    file_name=f"HR백업_{datetime.now().strftime('%Y%m%d_%H%M')}.db",
+                    mime="application/octet-stream",
+                    key="db_backup_dl", use_container_width=True,
+                )
+            except Exception as e:
+                st.error(f"백업 파일을 만들 수 없습니다: {e}")
+
+        with col2:
+            st.markdown("**2) 백업 파일로 복원하기**")
+            st.caption("복원하면 지금 들어있는 내용은 지워지고 백업 시점으로 되돌아갑니다.")
+            up = st.file_uploader(
+                "백업 파일(.db) 올리기", type=["db"], key="db_restore_file",
+                label_visibility="collapsed",
+            )
+            if up is not None:
+                data = up.getvalue()
+                if not data.startswith(_SQLITE_MAGIC):
+                    st.error("이 앱에서 내려받은 백업 파일이 아닌 것 같아요.")
+                elif st.button("⚠️ 이 파일로 복원하기", key="db_restore_btn",
+                               use_container_width=True):
+                    try:
+                        with open(db.DB_PATH, "wb") as f:
+                            f.write(data)
+                        db.init_db()   # 그 사이 새로 생긴 컬럼이 있으면 맞춰줌
+                        st.session_state["db_restored"] = True
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"복원하지 못했습니다: {e}")
+
+        if st.session_state.pop("db_restored", False):
+            st.success("✅ 복원했어요. 직원 목록과 근태를 확인해보세요.")
+
+
 def admin_accounts_view(user):
     with st.expander("🔀 탭 순서 바꾸기", expanded=st.session_state.get("tab_order_open", False)):
         tab_order_settings_view()
@@ -911,6 +1119,8 @@ def admin_accounts_view(user):
                 st.error(msg)
 
     st.divider()
+    _backup_restore_view()
+
     with st.expander("엑셀로 직원 일괄 등록 (여러 명 한번에)"):
         st.caption(
             "70명을 한 명씩 등록하기 번거로우시면, 아래 양식에 맞춰 엑셀을 채워서 올리세요. "
@@ -1114,11 +1324,70 @@ def _month_bounds(year, month):
 
 
 def _person_records(category, start, end):
-    """{(이름, 'YYYY-MM-DD'): 코드}, {(이름, 날짜): 메모}"""
+    """{(이름, 'YYYY-MM-DD'): 코드}, {(이름, 날짜): 메모}
+
+    본사 규칙 (2026-08-30 확인):
+      · 주말(토·일)에 '휴무'로 올라온 건은 엑셀에 기재하지 않습니다.
+        (관리팀·소매팀·도매팀·재고팀은 주말 근무가 있어서 나머지 인원이 '휴무'로 올리는데,
+         그건 원래 쉬는 날이라 근태표에 적을 내용이 아님)
+      · 주말 출근은 '당직'으로 봅니다 — 카톡을 읽는 단계에서 이미 당직으로 바꿔둡니다.
+      · 단, 전산팀은 일요일이 전원 휴무라서 카톡에 안 올라와도 '휴무'로 채워 넣습니다.
+    저장은 그대로 두고 '엑셀에 적을 때만' 손보기 때문에, 캘린더의 보고 현황은 영향받지 않습니다.
+    """
     rows = db.get_all_attendance(start.isoformat(), end.isoformat(), category=category)
-    recs = {(r["name"], r["work_date"]): r["code"] for r in rows}
-    memos = {(r["name"], r["work_date"]): (r["memo"] or "") for r in rows if r.get("memo")}
+    dept_of = {}
+    if category == "본사":
+        dept_of = {u["name"]: (u.get("department") or "")
+                   for u in db.list_attendance_users("본사")}
+
+    recs, memos = {}, {}
+    skipped = 0
+    for r in rows:
+        name = r["name"]
+        code = str(r["code"] or "").strip()
+        memo = str(r["memo"] or "").strip()
+        sunday_off_team = (dept_of.get(name) == SUNDAY_OFF_DEPT and _weekday(r["work_date"]) == 6)
+        if (category == "본사" and code == "휴무" and not memo
+                and _weekday(r["work_date"]) in (5, 6) and not sunday_off_team):
+            skipped += 1
+            continue
+        recs[(name, r["work_date"])] = r["code"]
+        if memo:
+            memos[(name, r["work_date"])] = memo
+
+    # 전산팀 일요일 = 전원 휴무 (카톡에 안 올라와도 자동으로 채움)
+    if category == "본사":
+        for name, dept in dept_of.items():
+            if dept != SUNDAY_OFF_DEPT:
+                continue
+            for d in _dates_between(start, end):
+                if d.weekday() == 6 and (name, d.isoformat()) not in recs:
+                    recs[(name, d.isoformat())] = "휴무"
+
+    if skipped:
+        st.session_state["exp_weekend_skipped"] = (
+            st.session_state.get("exp_weekend_skipped", 0) + skipped
+        )
     return recs, memos
+
+
+# 일요일이 전원 휴무인 부서
+SUNDAY_OFF_DEPT = "전산팀"
+
+
+def _weekday(dstr):
+    """'YYYY-MM-DD' → 요일 번호(월0 … 토5, 일6). 못 읽으면 -1"""
+    try:
+        return date.fromisoformat(str(dstr)[:10]).weekday()
+    except ValueError:
+        return -1
+
+
+def _dates_between(start, end):
+    d = start
+    while d <= end:
+        yield d
+        d += timedelta(days=1)
 
 
 def _store_records(start, end):
@@ -1171,6 +1440,13 @@ def excel_export_view(user):
         "DB에 저장된 근태를 실제 쓰시는 엑셀 양식에 그대로 채워서 내려받는 곳이에요. "
         "수식은 건드리지 않고 값만 채워 넣습니다."
     )
+    st.info(
+        "**본사 주말 규칙이 자동으로 적용돼요** — "
+        "① 주말(토·일) 출근은 **당직**으로 기재  "
+        "② 주말 휴무는 **기재하지 않음**  "
+        f"③ **{SUNDAY_OFF_DEPT} 일요일은 전원 휴무**로 채움"
+    )
+    st.session_state["exp_weekend_skipped"] = 0
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1420,8 +1696,9 @@ def single_edit_view(user):
     else:
         st.caption("이 날짜에 저장된 근태가 아직 없어요.")
 
-    idx = db.ATTENDANCE_CODES.index(cur["code"]) if cur and cur["code"] in db.ATTENDANCE_CODES else 0
-    code = st.selectbox("근태 코드", db.ATTENDANCE_CODES, index=idx, key="se_code")
+    _codes = db.get_attendance_codes()
+    idx = _codes.index(cur["code"]) if cur and cur["code"] in _codes else 0
+    code = st.selectbox("근태 코드", _codes, index=idx, key="se_code")
     memo = st.text_input("메모 (선택)", value=(cur or {}).get("memo") or "",
                          placeholder="예: 오전 반차, 결혼식 참석 등", key="se_memo")
 
@@ -1437,7 +1714,7 @@ def single_edit_view(user):
             st.success(f"{name} · {work_date.isoformat()} 기록을 지웠어요.")
             st.rerun()
 
-    st.caption("근태 코드: " + " · ".join(db.ATTENDANCE_CODES))
+    st.caption("근태 코드: " + " · ".join(db.get_attendance_codes()))
     st.divider()
 
     st.markdown(f"**{name} 님의 이번 달 기록**")
@@ -1500,7 +1777,7 @@ def main():
 
     st.title("🗂️ (주)대교통신 HR 플랫폼")
     # 배포된 코드가 최신인지 한눈에 확인하려고 버전을 찍어둡니다.
-    st.caption("버전 2026-08-30 v13")
+    st.caption("버전 2026-08-30 v16 (백업·복원, 항목 직접추가, 주말 규칙)")
 
     view_funcs = {
         "kakao": lambda: kakao_import_view(user),
