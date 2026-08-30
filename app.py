@@ -369,6 +369,13 @@ _SENDER_PREFIX_RE = re.compile(r"^\[.+?\]\s*\[(?:오전|오후)\s*\d{1,2}:\d{2}\
 
 _STATUS_TIME_MEMO = {"오전반차": "오전", "오후반차": "오후"}
 
+# 파서가 어떤 패턴으로도 못 잡았지만, 콜론이 있거나 근태 관련 단어가 들어있어서
+# 혹시 놓친 근태 보고일 수도 있는 줄을 "확인이 필요할 수도 있는 줄"로 따로 모아서 보여줌.
+_MAYBE_ATTENDANCE_RE = re.compile(r"[:：]|출근|휴무|연차|반차|지각|조퇴|특근|당직|퇴근")
+
+# 카카오톡 "대화 내보내기" .txt 파일 맨 위에 항상 붙는 안내 줄(대화방 이름, 저장한 날짜)은 근태와 무관하니 무시
+_EXPORT_METADATA_RE = re.compile(r"^저장한 날짜\s*[:：]|님과\s*카카오톡\s*대화\s*$")
+
 
 def _strip_kakao_prefix(raw_line):
     return _SENDER_PREFIX_RE.sub("", raw_line, count=1).strip()
@@ -376,15 +383,17 @@ def _strip_kakao_prefix(raw_line):
 
 def parse_headquarters_chat(text, fallback_date):
     """본사 카톡 형식: "8월 28일 (금) 전산팀 출근현황" 헤더 다음 "이름 : 상태" 줄들.
-    "-이름 : 상태"처럼 앞에 - 가 붙는 경우, 카카오톡 대화 내보내기 [보낸사람] [시간] 접두어도 처리."""
-    header_re = re.compile(r"(\d{1,2})월\s*(\d{1,2})일.*?(?:출근현황|근태)")
+    "-이름 : 상태"처럼 앞에 - 가 붙는 경우, 카카오톡 대화 내보내기 [보낸사람] [시간] 접두어도 처리.
+    반환값: (인식된 근태 목록, 확인이 필요할 수도 있는 줄 목록)"""
+    header_re = re.compile(r"(\d{1,2})월\s*(\d{1,2})일?.*?(?:출근현황|근태)")
     name_status_re = re.compile(r"^\s*-?\s*([가-힣A-Za-z0-9]+)\s*[:：]\s*(.+?)\s*$")
 
     results = []
+    unrecognized = []
     current_date = fallback_date
     for raw in text.splitlines():
         line = _strip_kakao_prefix(raw)
-        if not line:
+        if not line or _EXPORT_METADATA_RE.search(line):
             continue
         dm = _DATE_DIVIDER_RE.search(line)
         if dm:
@@ -410,22 +419,27 @@ def parse_headquarters_chat(text, fallback_date):
                 "work_date": current_date, "code": code or "기타",
                 "memo": _STATUS_TIME_MEMO.get(status_text, "" if code else status_text),
             })
-    return results
+            continue
+        if _MAYBE_ATTENDANCE_RE.search(line):
+            unrecognized.append(line)
+    return results, unrecognized
 
 
 def parse_jikyeong_chat(text, fallback_date):
-    """직영 카톡 형식: "매장명 출근보고" / "10시 이름1 이름2" / "휴무 이름A 이름B" / "이상입니다" """
+    """직영 카톡 형식: "매장명 출근보고" / "10시 이름1 이름2" / "휴무 이름A 이름B" / "이상입니다".
+    반환값: (인식된 근태 목록, 확인이 필요할 수도 있는 줄 목록)"""
     report_start_re = re.compile(r"^(.+?)\s*출근보고\s*$")
     time_line_re = re.compile(r"^\d{1,2}시\s*(.+)$")
     end_re = re.compile(r"^이상입니다\s*$")
 
     lines = [_strip_kakao_prefix(l) for l in text.splitlines()]
     results = []
+    unrecognized = []
     current_date = fallback_date
     i = 0
     while i < len(lines):
         line = lines[i]
-        if not line:
+        if not line or _EXPORT_METADATA_RE.search(line):
             i += 1
             continue
         rm = report_start_re.match(line)
@@ -445,6 +459,8 @@ def parse_jikyeong_chat(text, fallback_date):
                     code = _KAKAO_STATUS_MAP[parts[0]]
                     for nm in parts[1:]:
                         block[nm] = code
+                elif lines[i] and _MAYBE_ATTENDANCE_RE.search(lines[i]):
+                    unrecognized.append(lines[i])
                 i += 1
             if i < len(lines) and end_re.match(lines[i]):
                 i += 1
@@ -460,8 +476,12 @@ def parse_jikyeong_chat(text, fallback_date):
                 current_date = date(int(dm.group(1)), int(dm.group(2)), int(dm.group(3)))
             except ValueError:
                 pass
+            i += 1
+            continue
+        if _MAYBE_ATTENDANCE_RE.search(line):
+            unrecognized.append(line)
         i += 1
-    return results
+    return results, unrecognized
 
 
 def parse_sosajang_chat(text, fallback_date):
@@ -473,11 +493,12 @@ def parse_sosajang_chat(text, fallback_date):
     no_store_words = {"금일", "오늘", "익일", "내일"}
 
     results = []
+    unrecognized = []
     current_date = fallback_date
     current_store = None
     for raw in text.splitlines():
         line = _strip_kakao_prefix(raw)
-        if not line:
+        if not line or _EXPORT_METADATA_RE.search(line):
             continue
 
         store_matches = [s for s in short_stores if s in line]
@@ -513,7 +534,9 @@ def parse_sosajang_chat(text, fallback_date):
 
         if found_store:
             current_store = found_store
-    return results
+        elif _MAYBE_ATTENDANCE_RE.search(line):
+            unrecognized.append(line)
+    return results, unrecognized
 
 
 _KAKAO_EXAMPLES = {
@@ -569,11 +592,11 @@ def kakao_import_view(user):
         else:
             fallback_date = date(int(target_year), int(target_month), 1)
             if category == "본사":
-                all_parsed = parse_headquarters_chat(source_text, fallback_date)
+                all_parsed, unrecognized = parse_headquarters_chat(source_text, fallback_date)
             elif category == "직영":
-                all_parsed = parse_jikyeong_chat(source_text, fallback_date)
+                all_parsed, unrecognized = parse_jikyeong_chat(source_text, fallback_date)
             else:
-                all_parsed = parse_sosajang_chat(source_text, fallback_date)
+                all_parsed, unrecognized = parse_sosajang_chat(source_text, fallback_date)
 
             parsed = [
                 r for r in all_parsed
@@ -581,12 +604,21 @@ def kakao_import_view(user):
             ]
             st.session_state["kakao_parsed"] = parsed
             st.session_state["kakao_parsed_category"] = category
+            st.session_state["kakao_unrecognized"] = unrecognized
             st.info(f"전체 인식 {len(all_parsed)}건 중 {int(target_year)}년 {int(target_month)}월 대상 {len(parsed)}건만 가져왔어요.")
             if not parsed:
                 st.warning("인식된 근태 내용이 없어요. 형식이 다르면 캡처해서 알려주시면 맞춰드릴게요.")
 
     parsed = st.session_state.get("kakao_parsed")
     parsed_category = st.session_state.get("kakao_parsed_category")
+    unrecognized = st.session_state.get("kakao_unrecognized") or []
+
+    if parsed_category == category and unrecognized:
+        with st.expander(f"🔍 확인이 필요할 수도 있는 줄 ({len(unrecognized)}건) — 근태일 수도 있는데 못 읽었어요"):
+            st.caption("아래 줄들은 형식이 달라서 자동으로 인식하지 못했어요. 근태 내용이 맞다면 캡처해서 알려주시면 파서를 맞춰드릴게요.")
+            for line in unrecognized:
+                st.text(line)
+
     if parsed and parsed_category == category:
         st.divider()
         st.markdown(f"**미리보기 — {len(parsed)}건 인식됨. 확인하고 틀린 부분은 고친 뒤 저장하세요.**")
@@ -953,8 +985,23 @@ def admin_view(user):
                 key="bulk_template_dl",
             )
 
+            if "bulk_upload_key_n" not in st.session_state:
+                st.session_state["bulk_upload_key_n"] = 0
+
+            bulk_result = st.session_state.pop("bulk_register_result", None)
+            if bulk_result:
+                if bulk_result["success"]:
+                    st.success(f"✅ {bulk_result['success']}명 등록 완료 — 직원 목록에 바로 반영됐어요.")
+                if bulk_result["failed"]:
+                    st.error(f"실패 {len(bulk_result['failed'])}건")
+                    st.dataframe(
+                        pd.DataFrame(bulk_result["failed"], columns=["아이디", "실패 사유"]),
+                        use_container_width=True, hide_index=True,
+                    )
+
             uploaded = st.file_uploader(
-                "작성한 엑셀 파일 업로드 (.xlsx)", type=["xlsx"], key="bulk_upload_file"
+                "작성한 엑셀 파일 업로드 (.xlsx)", type=["xlsx"],
+                key=f"bulk_upload_file_{st.session_state['bulk_upload_key_n']}",
             )
             if uploaded is not None:
                 try:
@@ -993,15 +1040,11 @@ def admin_view(user):
                                 ok, msg = db.create_user(uname, pw, name, category, org_unit, role)
                                 (success if ok else failed).append(uname if ok else (uname, msg))
 
-                            st.success(f"성공: {len(success)}건")
-                            if failed:
-                                st.error(f"실패: {len(failed)}건")
-                                st.dataframe(
-                                    pd.DataFrame(failed, columns=["아이디", "실패 사유"]),
-                                    use_container_width=True, hide_index=True,
-                                )
-                            if success:
-                                st.rerun()
+                            st.session_state["bulk_register_result"] = {
+                                "success": len(success), "failed": failed,
+                            }
+                            st.session_state["bulk_upload_key_n"] += 1
+                            st.rerun()
 
         st.divider()
         st.subheader("직원 목록")
