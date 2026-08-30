@@ -176,44 +176,44 @@ def upsert_attendance(user_id: int, work_date: str, code: str, memo: str = ""):
                VALUES (?, ?, ?, ?, ?, ?)""",
             (user_id, work_date, code, memo, now, now),
         )
- conn.commit ()
- conn.close ()
+    conn.commit()
+    conn.close()
 
 
-def get_user_attendance (user_id: int, start_date: str = 없음, end_date: str = 없음):
- conn = get_conn ()
- q = "출석 중에서 * 사용자 ID = ?"를 선택합니다
- params = [user_id]
- 시작 날짜인 경우:
- q += "AND work_date >= ?"
- params.append(시작_일)
- 끝_날짜인 경우:
- q += "그리고 작업 날짜 <= ?"
- params.append(끝_날짜)
- q += "작업별 주문_날짜 설명"
- 행 = conn.execute(q, params).페치올 ()
- conn.close ()
- 반환 [r 행의 경우 dict(r))]
+def get_user_attendance(user_id: int, start_date: str = None, end_date: str = None):
+    conn = get_conn()
+    q = "SELECT * FROM attendance WHERE user_id = ?"
+    params = [user_id]
+    if start_date:
+        q += " AND work_date >= ?"
+        params.append(start_date)
+    if end_date:
+        q += " AND work_date <= ?"
+        params.append(end_date)
+    q += " ORDER BY work_date DESC"
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
-def get_all_attendance (시작_일: str = 없음, 종료_일: str = 없음, 부서: str = 없음):
- conn = get_conn ()
- q = """
- a.work_date, a.code, a.memo, u.name , u.department, u.username, a.updated_at 선택
- 출석부터 사용자는 a.user_id = u.id 에 가입하세요
- WHERE 1=1
- """
- 매개변수 = []
- 시작 날짜인 경우:
- q += "그리고 a.work_date >= ?"
- params.append(시작_일)
- 끝_날짜인 경우:
- q += "그리고 a.work_date <= ?"
- params.append(끝_날짜)
- 만약 부서와 부서!= "전체":
- q += "그리고 u.department = ?"
- params. append(부서)
- q += "주문: a.work_date DESC, u.department, u.name "
- 행 = conn.execute(q, params).페치올 ()
- conn.close ()
- 반환 [r 행의 경우 dict(r))]
+def get_all_attendance(start_date: str = None, end_date: str = None, department: str = None):
+    conn = get_conn()
+    q = """
+        SELECT a.work_date, a.code, a.memo, u.name, u.department, u.username, a.updated_at
+        FROM attendance a JOIN users u ON a.user_id = u.id
+        WHERE 1=1
+    """
+    params = []
+    if start_date:
+        q += " AND a.work_date >= ?"
+        params.append(start_date)
+    if end_date:
+        q += " AND a.work_date <= ?"
+        params.append(end_date)
+    if department and department != "전체":
+        q += " AND u.department = ?"
+        params.append(department)
+    q += " ORDER BY a.work_date DESC, u.department, u.name"
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
