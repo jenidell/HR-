@@ -28,6 +28,7 @@ ATTENDANCE_CODES = [
     "정상출근",
     "연차",
     "반차",
+    "대체오후반차",
     "휴가",
     "지각",
     "조퇴",
@@ -39,8 +40,43 @@ ATTENDANCE_CODES = [
     "무급",
     "개인용무",
     "휴무",
+    "대체휴무",
     "기타",
 ]
+
+CUSTOM_CODES_KEY = "custom_attendance_codes"
+
+
+def get_attendance_codes():
+    """기본 근태 항목 + 화면에서 직접 추가한 항목. '기타'는 항상 맨 뒤."""
+    raw = get_setting(CUSTOM_CODES_KEY, "") or ""
+    codes = [c for c in ATTENDANCE_CODES if c != "기타"]
+    for c in [x.strip() for x in raw.split(",") if x.strip()]:
+        if c not in codes:
+            codes.append(c)
+    codes.append("기타")
+    return codes
+
+
+def add_attendance_code(code):
+    """근태 항목을 하나 추가합니다. 이미 있으면 아무 일도 안 합니다."""
+    code = str(code or "").strip()
+    if not code or code in get_attendance_codes():
+        return False
+    raw = get_setting(CUSTOM_CODES_KEY, "") or ""
+    extra = [c.strip() for c in raw.split(",") if c.strip()]
+    extra.append(code)
+    set_setting(CUSTOM_CODES_KEY, ",".join(extra))
+    return True
+
+
+def remove_attendance_code(code):
+    """화면에서 추가했던 항목만 뺄 수 있습니다 (기본 항목은 못 뺌)."""
+    code = str(code or "").strip()
+    raw = get_setting(CUSTOM_CODES_KEY, "") or ""
+    extra = [c.strip() for c in raw.split(",") if c.strip() and c.strip() != code]
+    set_setting(CUSTOM_CODES_KEY, ",".join(extra))
+
 
 # 직원 구분 (본사 / 직영 / 소사장)
 CATEGORIES = ["본사", "직영", "소사장"]
