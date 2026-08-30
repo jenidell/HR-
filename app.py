@@ -9,15 +9,46 @@
 """
 
 import io
+import os
 from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
+from openpyxl import Workbook
 
 import db
 
 st.set_page_config(page_title="(주)대교통신 HR 플랫폼", page_icon="🗂️", layout="wide")
 db.init_db()
+
+DOCS_DIR = os.path.join(os.path.dirname(__file__), "docs")
+
+
+def _list_docs(subfolder: str):
+    """docs/<subfolder> 안의 파일 목록을 (파일명, 전체경로) 리스트로 반환. 폴더가 없으면 빈 리스트."""
+    folder = os.path.join(DOCS_DIR, subfolder)
+    if not os.path.isdir(folder):
+        return []
+    files = []
+    for fname in sorted(os.listdir(folder)):
+        fpath = os.path.join(folder, fname)
+        if os.path.isfile(fpath) and not fname.startswith(".") and fname.lower() != "readme.md":
+            files.append((fname, fpath))
+    return files
+
+
+def documents_view(subfolder: str, empty_msg: str):
+    files = _list_docs(subfolder)
+    if not files:
+        st.info(empty_msg)
+        return
+    for fname, fpath in files:
+        with open(fpath, "rb") as f:
+            data = f.read()
+        st.download_button(
+            f"📄 {fname}", data=data, file_name=fname,
+            key=f"doc_dl_{subfolder}_{fname}", use_container_width=True,
+        )
 
 
 def _build_bulk_template():
@@ -93,6 +124,11 @@ def employee_view(user):
             "경조 · 예비군 · 무급 · 개인용무 · 휴무 · 기타\n\n"
             "같은 날짜에 다시 입력하면 기존 내용을 덮어씁니다(수정)."
         )
+        st.info(
+            "💡 담당자가 '일괄입력'에서 같은 날짜를 저장하면 여기서 입력한 내용도 "
+            "그 내용으로 덮어써요. 평소엔 담당자의 일괄입력을 기본으로 하고, "
+            "개인 입력은 급하게 미리 남겨둘 때만 쓰는 걸 추천해요."
+        )
 
     st.divider()
     st.subheader("내 최근 입력 내역")
@@ -143,6 +179,11 @@ def employee_view(user):
 def bulk_entry_view(user):
     st.header("일괄입력")
     st.caption("본사 부서, 직영·소사장 매장 담당자가 하루 단위로 소속 인원 전체 근태를 한번에 입력할 수 있어요.")
+    st.caption(
+        "💡 헷갈리지 않으려면: 이 화면을 '공식 입력'으로 쓰고, 아직 선택 안 한 사람은 "
+        "그대로 두면 저장되지 않아요 — 정상출근이 자동으로 저장되지 않으니 안심하고 "
+        "빈 채로 넘어가도 됩니다."
+    )
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -168,20 +209,66 @@ def bulk_entry_view(user):
 
     existing = db.get_attendance_for_date(work_date.isoformat(), category, org_unit)
 
+    entered_count = len(existing)
+    member_count = len(members)
+    if work_date == date.today():
+        if entered_count == 0:
+            st.warning(f"⚠️ 오늘({work_date.isoformat()}) {org_unit} 근태를 아직 아무도 입력하지 않았어요.")
+        elif entered_count < member_count:
+            st.info(f"📝 오늘 {org_unit} {entered_count}/{member_count}명 입력 완료. 나머지 인원도 확인해주세요.")
+        else:
+            st.success(f"✅ 오늘 {org_unit} 전원({member_count}명) 입력 완료!")
+    else:
+        st.caption(f"선택한 날짜({work_date.isoformat()}) 기준 {org_unit} {entered_count}/{member_count}명 입력됨")
+
+    with st.expander(f"{org_unit} 이번 달 날짜별 입력 현황 (언제 안 올렸는지 확인)"):
+        month_start = work_date.replace(day=1)
+        today = date.today()
+        month_end = min(
+            date(work_date.year, work_date.month + 1, 1) - timedelta(days=1)
+            if work_date.month < 12 else date(work_date.year, 12, 31),
+            today,
+        )
+        counts = db.get_daily_entry_counts(
+            category, org_unit, month_start.isoformat(), month_end.isoformat()
+        )
+        weekday_kr = ["월", "화", "수", "목", "금", "토", "일"]
+        rows = []
+        d = month_start
+        while d <= month_end:
+            cnt = counts.get(d.isoformat(), 0)
+            if cnt == 0:
+                status = "❌ 미입력"
+            elif cnt < member_count:
+                status = f"⚠️ 일부만 ({cnt}/{member_count}명)"
+            else:
+                status = f"✅ 완료 ({cnt}/{member_count}명)"
+            rows.append({"날짜": d.isoformat(), "요일": weekday_kr[d.weekday()], "상태": status})
+            d += timedelta(days=1)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    NOT_SELECTED = "─ 선택 안 함 ─"
+    BULK_CODE_OPTIONS = [NOT_SELECTED] + db.ATTENDANCE_CODES
+
     with st.form("bulk_attendance_form"):
         entries = {}
         for m in members:
+            has_prev = m["id"] in existing
             prev = existing.get(m["id"], {})
-            prev_code = prev.get("code", "정상출근")
+            prev_code = prev.get("code", "")
             prev_memo = prev.get("memo", "")
-            code_idx = db.ATTENDANCE_CODES.index(prev_code) if prev_code in db.ATTENDANCE_CODES else 0
+            code_idx = BULK_CODE_OPTIONS.index(prev_code) if has_prev and prev_code in db.ATTENDANCE_CODES else 0
 
             col_name, col_code, col_memo = st.columns([2, 2, 3])
             with col_name:
                 st.markdown(f"**{m['name']}**")
+                if has_prev:
+                    st.caption(f"✅ 입력됨 ({prev_code})")
+                else:
+                    st.caption("⏳ 미입력")
             with col_code:
                 code = st.selectbox(
-                    "근태 코드", db.ATTENDANCE_CODES, index=code_idx,
+                    "근태 코드", BULK_CODE_OPTIONS, index=code_idx,
                     key=f"bulk_code_{m['id']}", label_visibility="collapsed",
                 )
             with col_memo:
@@ -189,15 +276,227 @@ def bulk_entry_view(user):
                     "메모", value=prev_memo, key=f"bulk_memo_{m['id']}",
                     label_visibility="collapsed", placeholder="메모 (선택)",
                 )
-            entries[m["id"]] = (code, memo)
+            entries[m["id"]] = (code, memo, m["name"])
 
         submitted = st.form_submit_button(f"{org_unit} 전체 저장 ({work_date.isoformat()})", use_container_width=True)
 
     if submitted:
-        for user_id, (code, memo) in entries.items():
+        saved = 0
+        skipped_names = []
+        for user_id, (code, memo, name) in entries.items():
+            if code == NOT_SELECTED:
+                skipped_names.append(name)
+                continue
             db.upsert_attendance(user_id, work_date.isoformat(), code, memo)
-        st.success(f"{work_date.isoformat()} 기준 {org_unit} {len(entries)}명 근태가 저장되었습니다.")
+            saved += 1
+        if saved:
+            st.success(f"{work_date.isoformat()} 기준 {org_unit} {saved}명 근태가 저장되었습니다.")
+        if skipped_names:
+            st.warning(
+                f"⏳ 근태를 선택하지 않아 저장하지 않은 인원 {len(skipped_names)}명: "
+                f"{', '.join(skipped_names)} — 확인 후 다시 입력해주세요."
+            )
         st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# 공지사항
+# ---------------------------------------------------------------------------
+def announcements_view(user):
+    st.header("공지사항")
+
+    if user["role"] == "admin":
+        with st.expander("공지 작성"):
+            with st.form("new_announcement_form"):
+                title = st.text_input("제목")
+                content = st.text_area("내용", height=150)
+                submitted = st.form_submit_button("게시", use_container_width=True)
+            if submitted:
+                if not title.strip() or not content.strip():
+                    st.error("제목과 내용을 모두 입력해주세요.")
+                else:
+                    db.create_announcement(title.strip(), content.strip(), user["id"])
+                    st.success("공지사항이 등록되었습니다.")
+                    st.rerun()
+        st.divider()
+
+    announcements = db.list_announcements()
+    if not announcements:
+        st.info("등록된 공지사항이 없습니다.")
+        return
+
+    for a in announcements:
+        with st.container(border=True):
+            st.markdown(f"**{a['title']}**")
+            st.caption(f"{a['author_name']} · {(a['created_at'] or '')[:16].replace('T', ' ')}")
+            st.write(a["content"])
+            if user["role"] == "admin":
+                if st.button("삭제", key=f"ann_del_{a['id']}"):
+                    db.delete_announcement(a["id"])
+                    st.success("삭제되었습니다.")
+                    st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# 원본 근태 파일 형식(본사근태 / 직영근태 / 소사장근태) 그대로 엑셀 다운로드
+# ---------------------------------------------------------------------------
+
+# 본사/직영: 매장(부서) + 직원명 행 x 날짜 열 그리드. 예전 본사근태/직영근태 파일과 동일한 구조.
+def _build_roster_matrix_sheet(wb, sheet_name, employees, att_map, dates):
+    ws = wb.create_sheet(title=sheet_name)
+    weekday_kr = ["월", "화", "수", "목", "금", "토", "일"]
+    n = len(dates)
+
+    ws.cell(row=1, column=1, value=f"{sheet_name} 일정표 (빈 칸 = 정상출근)")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6 + n)
+
+    ws.cell(row=2, column=1, value="부서/매장")
+    ws.cell(row=2, column=2, value="직원명")
+    for i, d in enumerate(dates):
+        ws.cell(row=2, column=3 + i, value=weekday_kr[d.weekday()])
+    ws.cell(row=2, column=3 + n, value="휴무")
+    ws.cell(row=2, column=4 + n, value="연차")
+    ws.cell(row=2, column=5 + n, value="반차")
+    ws.cell(row=2, column=6 + n, value="합계")
+
+    for i, d in enumerate(dates):
+        ws.cell(row=3, column=3 + i, value=d.strftime("%-m/%-d"))
+
+    r = 4
+    for e in sorted(employees, key=lambda x: (x["department"], x["name"])):
+        ws.cell(row=r, column=1, value=e["department"])
+        ws.cell(row=r, column=2, value=e["name"])
+        hol = annual = half = 0
+        for i, d in enumerate(dates):
+            code = att_map.get((e["id"], d.isoformat()))
+            ws.cell(row=r, column=3 + i, value="" if code in (None, "정상출근") else code)
+            if code == "휴무":
+                hol += 1
+            elif code == "연차":
+                annual += 1
+            elif code == "반차":
+                half += 1
+        ws.cell(row=r, column=3 + n, value=hol)
+        ws.cell(row=r, column=4 + n, value=annual)
+        ws.cell(row=r, column=5 + n, value=half)
+        ws.cell(row=r, column=6 + n, value=hol + annual + half)
+        r += 1
+
+    ws.cell(row=r, column=1, value="재직인원")
+    for i in range(n):
+        ws.cell(row=r, column=3 + i, value=len(employees))
+
+
+# 소사장: 개인별 근태코드를 예전 '출첵' 파일처럼 매장 단위 요약(o/휴/개인/조기퇴근/지각/미입력)으로 변환
+_STORE_STATUS_MAP = {
+    "정상출근": "o",
+    "특근": "o",
+    "당직": "o",
+    "교육": "o",
+    "휴무": "휴",
+    "연차": "개인",
+    "반차": "개인",
+    "무급": "개인",
+    "개인용무": "개인",
+    "경조": "개인",
+    "예비군": "개인",
+    "지각": "지각",
+    "조퇴": "조기퇴근",
+    "기타": "기타",
+}
+
+
+def _store_status_for_date(codes):
+    """같은 매장 소속 직원들의 그날 근태코드 목록 -> 매장 단위 상태 문자열로 요약"""
+    if not codes:
+        return "미입력"
+    statuses = [_STORE_STATUS_MAP.get(c, c) for c in codes]
+    if "o" in statuses:
+        return "o"
+    if all(s == "휴" for s in statuses):
+        return "휴"
+    uniq = []
+    for s in statuses:
+        if s not in uniq:
+            uniq.append(s)
+    return "/".join(uniq)
+
+
+def _build_store_summary_sheet(wb, employees, att_map, dates):
+    ws = wb.create_sheet(title="소사장근태")
+    weekday_kr = ["월", "화", "수", "목", "금", "토", "일"]
+    n = len(dates)
+
+    seen = set()
+    stores = []
+    for e in employees:
+        if e["department"] not in seen:
+            stores.append(e["department"])
+            seen.add(e["department"])
+    ordered_stores = [s for s in db.SOSAJANG_STORES if s in seen] + [s for s in stores if s not in db.SOSAJANG_STORES]
+
+    ws.cell(
+        row=1, column=1,
+        value="소사장 매장별 근태 요약 (o=정상, 휴=휴무, 개인=연차·반차 등 개인사유, 조기퇴근, 지각, 미입력=입력 없음)",
+    )
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=1 + n)
+    ws.cell(row=2, column=1, value="매장명")
+    for i, d in enumerate(dates):
+        ws.cell(row=2, column=2 + i, value=weekday_kr[d.weekday()])
+    for i, d in enumerate(dates):
+        ws.cell(row=3, column=2 + i, value=d.strftime("%-m/%-d"))
+
+    emp_by_store = {}
+    for e in employees:
+        emp_by_store.setdefault(e["department"], []).append(e)
+
+    r = 4
+    for store in ordered_stores:
+        ws.cell(row=r, column=1, value=store)
+        for i, d in enumerate(dates):
+            ds = d.isoformat()
+            codes = [att_map.get((e["id"], ds)) for e in emp_by_store.get(store, [])]
+            codes = [c for c in codes if c]
+            ws.cell(row=r, column=2 + i, value=_store_status_for_date(codes))
+        r += 1
+
+
+def build_category_format_excel(start_date, end_date):
+    """본사근태 / 직영근태 / 소사장근태 - 예전에 쓰던 파일과 같은 서식으로 엑셀 생성 (구분별 시트 분리)"""
+    dates = []
+    d = start_date
+    while d <= end_date:
+        dates.append(d)
+        d += timedelta(days=1)
+    if not dates:
+        return None
+
+    all_employees = db.list_users(include_inactive=False)
+    wb = Workbook()
+    wb.remove(wb.active)
+    made_sheet = False
+
+    for category, sheet_name in [("본사", "본사근태"), ("직영", "직영근태")]:
+        emps = [e for e in all_employees if e["category"] == category]
+        if not emps:
+            continue
+        records = db.get_attendance_records_for_matrix(category, start_date.isoformat(), end_date.isoformat())
+        att_map = {(r["user_id"], r["work_date"]): r["code"] for r in records}
+        _build_roster_matrix_sheet(wb, sheet_name, emps, att_map, dates)
+        made_sheet = True
+
+    sosajang_emps = [e for e in all_employees if e["category"] == "소사장"]
+    if sosajang_emps:
+        records = db.get_attendance_records_for_matrix("소사장", start_date.isoformat(), end_date.isoformat())
+        att_map = {(r["user_id"], r["work_date"]): r["code"] for r in records}
+        _build_store_summary_sheet(wb, sosajang_emps, att_map, dates)
+        made_sheet = True
+
+    if not made_sheet:
+        return None
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +506,19 @@ def admin_view(user):
     tab1, tab2 = st.tabs(["전체 근태 현황", "직원 계정 관리"])
 
     with tab1:
+        st.subheader("근태 미입력 매장/부서 확인")
+        check_date = st.date_input("확인할 날짜", value=date.today(), key="missing_check_date")
+        summary = db.get_org_unit_summary_for_date(check_date.isoformat())
+        missing = [s for s in summary if s["employee_count"] > 0 and s["entered_count"] == 0]
+        if missing:
+            st.warning(f"{check_date.isoformat()} 기준, 근태 입력이 하나도 없는 부서/매장이 {len(missing)}곳 있어요.")
+            miss_df = pd.DataFrame(missing)[["category", "department", "employee_count"]]
+            miss_df.columns = ["구분", "부서/매장", "재직 인원"]
+            st.dataframe(miss_df, use_container_width=True, hide_index=True)
+        else:
+            st.success(f"{check_date.isoformat()} 기준, 모든 부서/매장에 근태가 입력되었어요.")
+
+        st.divider()
         st.subheader("전체 근태 현황")
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -223,6 +535,26 @@ def admin_view(user):
             else:
                 org_options = ["전체"] + db.get_org_units(category)
             org_unit = st.selectbox("부서/매장", org_options, key=f"admin_org_{category}")
+
+        st.markdown("**근태표 양식으로 다운로드 (본사·직영·소사장 원본 서식)**")
+        st.caption(
+            "예전에 쓰시던 본사근태·직영근태 파일과 같은 매장/부서·직원명 × 날짜 표, "
+            "소사장근태(출첵) 파일과 같은 매장 단위 요약표로 시트를 나눠서 받아요. "
+            "위 조회 시작일/종료일 기준으로 만들어집니다."
+        )
+        matrix_bytes = build_category_format_excel(start, end)
+        if matrix_bytes:
+            st.download_button(
+                "근태표 양식 엑셀 다운로드",
+                data=matrix_bytes,
+                file_name=f"근태표_{start.isoformat()}_{end.isoformat()}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="matrix_download",
+            )
+        else:
+            st.info("등록된 직원이 없어 근태표를 만들 수 없습니다.")
+
+        st.divider()
 
         records = db.get_all_attendance(start.isoformat(), end.isoformat(), category, org_unit)
         if records:
@@ -474,19 +806,35 @@ def main():
     st.title("🗂️ (주)대교통신 HR 플랫폼")
 
     if user["role"] == "admin":
-        tab_emp, tab_bulk, tab_admin = st.tabs(["내 근태입력", "일괄입력", "관리자"])
+        tab_emp, tab_bulk, tab_notice, tab_docs, tab_onboard, tab_admin = st.tabs(
+            ["내 근태입력", "일괄입력", "공지사항", "문서함", "온보딩", "관리자"]
+        )
         with tab_emp:
             employee_view(user)
         with tab_bulk:
             bulk_entry_view(user)
+        with tab_notice:
+            announcements_view(user)
+        with tab_docs:
+            documents_view("규정", "아직 등록된 규정 문서가 없습니다. GitHub 저장소의 docs/규정 폴더에 파일을 올려주세요.")
+        with tab_onboard:
+            documents_view("온보딩", "아직 등록된 온보딩 자료가 없습니다. GitHub 저장소의 docs/온보딩 폴더에 파일을 올려주세요.")
         with tab_admin:
             admin_view(user)
     else:
-        tab_emp, tab_bulk = st.tabs(["내 근태입력", "일괄입력"])
+        tab_emp, tab_bulk, tab_notice, tab_docs, tab_onboard = st.tabs(
+            ["내 근태입력", "일괄입력", "공지사항", "문서함", "온보딩"]
+        )
         with tab_emp:
             employee_view(user)
         with tab_bulk:
             bulk_entry_view(user)
+        with tab_notice:
+            announcements_view(user)
+        with tab_docs:
+            documents_view("규정", "아직 등록된 규정 문서가 없습니다.")
+        with tab_onboard:
+            documents_view("온보딩", "아직 등록된 온보딩 자료가 없습니다.")
 
 
 if __name__ == "__main__":
