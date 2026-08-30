@@ -46,10 +46,12 @@ ATTENDANCE_CODES = [
 CATEGORIES = ["본사", "직영", "소사장"]
 
 # 본사 소속 부서
-DEPARTMENTS = ["관리팀", "소매팀", "전산팀", "도매팀", "재고팀", "기타"]
+# 순서는 본사 근태 양식의 실제 배치 순서와 같게 맞춰둡니다 (엑셀 생성 시 이 순서로 채움)
+DEPARTMENTS = ["관리팀", "소매팀", "도매팀", "재고팀", "전산팀", "기타"]
 
 # 직영점 매장 목록
-JIKYEONG_STORES = ["범계역직영점", "상동점", "의왕점", "덕천직영점", "하안점"]
+# 순서는 직영점 근태 양식의 실제 배치 순서와 같게 맞춰둡니다
+JIKYEONG_STORES = ["범계역직영점", "의왕점", "상동점", "하안점", "덕천직영점"]
 
 # 소사장 매장 목록
 SOSAJANG_STORES = [
@@ -86,7 +88,8 @@ def list_attendance_users(category=None, org_unit=None):
     if org_unit:
         q += " AND department = ?"
         params.append(org_unit)
-    q += " ORDER BY category, department, name"
+    # 카톡에 이름이 나온 순서(sort_order)를 우선하고, 아직 모르는 사람은 이름순으로 뒤에
+    q += " ORDER BY category, department, CASE WHEN sort_order > 0 THEN sort_order ELSE 9999 END, name"
     rows = conn.execute(q, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -199,11 +202,16 @@ def init_db():
     conn.commit()
 
     # 예전 버전(구조 변경 전) DB에는 category 컬럼이 없을 수 있어 마이그레이션
-    try:
-        cur.execute("ALTER TABLE users ADD COLUMN category TEXT NOT NULL DEFAULT '본사'")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # 이미 컬럼이 있으면 무시
+    for ddl in [
+        "ALTER TABLE users ADD COLUMN category TEXT NOT NULL DEFAULT '본사'",
+        # 카톡 보고에 이름이 나온 순서. 근태 양식을 이 순서대로 채웁니다(0이면 아직 모름 → 이름순).
+        "ALTER TABLE users ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+    ]:
+        try:
+            cur.execute(ddl)
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # 이미 컬럼이 있으면 무시
 
     # 예전에 '기타'로 저장된 기록은 원래 표현이 memo에 남아 있습니다.
     # (예: 카톡에 "한송이 : 휴가"라고 올라왔는데 그때는 '휴가' 항목이 없어서 기타로 저장됨)
@@ -708,3 +716,19 @@ def find_user_by_name(name, category=None):
     rows = conn.execute(q, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def set_kakao_order(user_ids):
+    """카톡 보고에 이름이 나온 순서를 기억합니다 (근태 양식을 이 순서로 채우기 위함).
+    user_ids : 카톡에서 나온 순서대로의 직원 id 목록 (중복은 첫 등장만 반영)"""
+    conn = get_conn()
+    seen, n = set(), 0
+    for uid in user_ids:
+        if uid in seen:
+            continue
+        seen.add(uid)
+        n += 1
+        conn.execute("UPDATE users SET sort_order = ? WHERE id = ?", (n, uid))
+    conn.commit()
+    conn.close()
+    return n
