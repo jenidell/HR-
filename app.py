@@ -1,5 +1,5 @@
 """
-대교통신 사내 HR 플랫폼 - Phase 1 (근태입력 셀프서비스 MVP)
+(주)대교통신 사내 HR 플랫폼 - Phase 1 (근태입력 셀프서비스 MVP)
 
 실행:
     streamlit run app.py
