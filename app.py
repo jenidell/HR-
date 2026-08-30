@@ -774,6 +774,7 @@ def kakao_import_view(user):
         if submitted:
             saved = 0
             unmatched = 0
+            order_ids = []   # 카톡에 이름이 나온 순서 (근태 양식을 이 순서로 채우기 위함)
             for idx in row_keys:
                 if not st.session_state.get(f"kk_include_{idx}", True):
                     continue
@@ -789,7 +790,10 @@ def kakao_import_view(user):
                 code = st.session_state.get(f"kk_code_{idx}")
                 memo = st.session_state.get(f"kk_memo_{idx}", "")
                 db.upsert_attendance(emp["id"], wd.isoformat(), code, memo)
+                order_ids.append(emp["id"])
                 saved += 1
+            if order_ids:
+                db.set_kakao_order(order_ids)
             st.session_state["kk_last_result"] = (saved, unmatched)
             if unmatched:
                 # 매칭 안 된 게 남았으면 그 건들만 보이게 화면을 다시 그림
@@ -1214,8 +1218,10 @@ def excel_export_view(user):
         def _bonsa_build():
             roster = [{"name": e["name"], "department": e["department"]}
                       for e in db.list_attendance_users("본사")]
-            roster.sort(key=lambda e: (db.DEPARTMENTS.index(e["department"])
-                                       if e["department"] in db.DEPARTMENTS else 99, e["name"]))
+            # 이름 정렬은 db.list_attendance_users가 이미 (부서 → 카톡 등장 순서 → 이름)으로 해줍니다.
+            # 여기서는 부서 순서만 양식 배치와 맞춥니다.
+            roster.sort(key=lambda e: db.DEPARTMENTS.index(e["department"])
+                        if e["department"] in db.DEPARTMENTS else 99)
             recs, memos = _person_records("본사", start, end)
             return excel_export.build_bonsa_form(year, month, roster, recs, memos)
 
@@ -1263,9 +1269,10 @@ def excel_export_view(user):
                     f"{stamp}_소사장_실적보고.xlsx")
     else:
 
-        st.caption(
-            "쓰시던 월간 출퇴근 현황 파일을 올리면 '▶ 데이터' 탭의 해당 열만 채워서 돌려드려요. "
-            "나머지 시트·수식·지문 기록은 손대지 않아요."
+        st.info(
+            "**이 파일은 올려주셔야 해요.** 근태 양식과 달리 매달 캡스 지문 기록이 들어있는 "
+            "그 달의 실제 파일이라, 앱이 미리 갖고 있을 수 없거든요.\n\n"
+            "올리시면 '▶ 데이터' 탭의 해당 열만 채워서 돌려드려요. 나머지 시트·수식·지문 기록은 손대지 않아요."
         )
         src_mode = st.radio(
             "무엇을 기준으로 채울까요?",
@@ -1286,7 +1293,9 @@ def excel_export_view(user):
                 st.caption("둘 중 하나만 올리셔도 돼요. 올린 것만 반영됩니다.")
             f1 = st.file_uploader("채울 출퇴근 현황 파일 (.xlsx)", type=["xlsx"], key="exp_st_bj")
             clear1 = st.checkbox("기존에 적혀 있던 G~U 값은 지우고 새로 채우기", True, key="exp_st_bj_clear")
-            if f1 is not None and st.button("채우기", key="exp_st_bj_run"):
+            if st.button("채우기", key="exp_st_bj_run", use_container_width=True,
+                         disabled=(f1 is None),
+                         help="위에 출퇴근 현황 파일을 먼저 올려주세요" if f1 is None else None):
                 try:
                     if from_form:
                         recs, memos = {}, {}
@@ -1336,7 +1345,9 @@ def excel_export_view(user):
             f2 = st.file_uploader("채울 출퇴근 현황 파일 (.xlsx)", type=["xlsx"], key="exp_st_s")
             clear2 = st.checkbox("기존에 적혀 있던 K~AH 값은 지우고 새로 채우기", True, key="exp_st_s_clear")
             unrep = st.checkbox("출첵 기준으로 출근/퇴근 미보고(N·O열)도 자동 체크", False, key="exp_st_s_unrep")
-            if f2 is not None and st.button("채우기", key="exp_st_s_run"):
+            if st.button("채우기", key="exp_st_s_run", use_container_width=True,
+                         disabled=(f2 is None),
+                         help="위에 출퇴근 현황 파일을 먼저 올려주세요" if f2 is None else None):
                 try:
                     if from_form:
                         if fs is None:
