@@ -16,7 +16,6 @@ from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
-from streamlit_sortables import sort_items
 
 import db
 import excel_export
@@ -76,28 +75,40 @@ def _save_tab_order(order):
 
 
 def tab_order_settings_view():
-    st.caption(
-        "아래 목록을 손가락으로 눌러서 위아래로 끌어놓으면(드래그) 순서가 바로 저장되고, "
-        "탭 순서도 그대로 바뀌어요. (Streamlit 특성상 화면 위쪽 탭 글자 자체를 직접 끌 수는 없어서, "
-        "이 목록을 대신 드래그하는 방식이에요.)"
-    )
+    """탭 순서 바꾸기 — ▲▼ 버튼 방식.
+
+    예전에는 드래그(streamlit-sortables)로 만들었는데, 이 부품은 화면 안 작은 창(iframe)에서
+    돌아가느라 환경에 따라 아예 안 뜨는 일이 있었습니다. 외부 부품 없이 확실히 동작하도록
+    기본 버튼 방식으로 바꿨습니다.
+    """
+    st.caption("▲▼ 버튼으로 순서를 바꾸면 바로 저장되고, 화면 위쪽 탭 순서도 같이 바뀌어요.")
+
     order = _get_tab_order()
-    current_labels = [TAB_LABELS[k] for k in order]
+    for i, key in enumerate(order):
+        c1, c2, c3 = st.columns([6, 1, 1])
+        with c1:
+            st.markdown(f"**{i + 1}. {TAB_LABELS[key]}**")
+        with c2:
+            if st.button("▲", key=f"tab_up_{key}", disabled=(i == 0),
+                         use_container_width=True, help="위로"):
+                order[i - 1], order[i] = order[i], order[i - 1]
+                _save_tab_order(order)
+                st.session_state["tab_order_open"] = True
+                st.rerun()
+        with c3:
+            if st.button("▼", key=f"tab_down_{key}", disabled=(i == len(order) - 1),
+                         use_container_width=True, help="아래로"):
+                order[i + 1], order[i] = order[i], order[i + 1]
+                _save_tab_order(order)
+                st.session_state["tab_order_open"] = True
+                st.rerun()
 
-    # 탭 구성이 바뀌면(탭을 합치거나 없앴을 때) 드래그 위젯에 예전 목록이 남아 오류가 났었습니다.
-    # 위젯 key에 현재 탭 구성을 넣어, 구성이 바뀌면 위젯도 새로 만들어지게 합니다.
-    widget_key = "tab_order_sortable_" + "_".join(order)
-    new_labels = sort_items(current_labels, direction="vertical", key=widget_key)
-
-    label_to_key = {v: k for k, v in TAB_LABELS.items()}
-    # 지금 없는 탭 이름이 섞여 들어와도 그냥 무시 (예전 목록이 남아있는 경우 대비)
-    new_order = [label_to_key[l] for l in (new_labels or []) if l in label_to_key]
-    for k in order:
-        if k not in new_order:
-            new_order.append(k)
-    if new_order != order:
-        _save_tab_order(new_order)
-        st.rerun()
+    if order != list(DEFAULT_TAB_ORDER):
+        st.divider()
+        if st.button("기본 순서로 되돌리기", key="tab_reset", use_container_width=True):
+            _save_tab_order(list(DEFAULT_TAB_ORDER))
+            st.session_state["tab_order_open"] = True
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -859,7 +870,7 @@ def admin_status_view(user):
 # 관리자용: 직원 계정 관리
 # ---------------------------------------------------------------------------
 def admin_accounts_view(user):
-    with st.expander("🔀 탭 순서 바꾸기"):
+    with st.expander("🔀 탭 순서 바꾸기", expanded=st.session_state.get("tab_order_open", False)):
         tab_order_settings_view()
 
     st.divider()
