@@ -402,7 +402,7 @@ def parse_headquarters_chat(text, fallback_date):
             })
             continue
         if _MAYBE_ATTENDANCE_RE.search(line):
-            unrecognized.append(line)
+            unrecognized.append((line, current_date))
     return results, unrecognized
 
 
@@ -441,7 +441,7 @@ def parse_jikyeong_chat(text, fallback_date):
                     for nm in parts[1:]:
                         block[nm] = code
                 elif lines[i] and _MAYBE_ATTENDANCE_RE.search(lines[i]):
-                    unrecognized.append(lines[i])
+                    unrecognized.append((lines[i], current_date))
                 i += 1
             if i < len(lines) and end_re.match(lines[i]):
                 i += 1
@@ -460,7 +460,7 @@ def parse_jikyeong_chat(text, fallback_date):
             i += 1
             continue
         if _MAYBE_ATTENDANCE_RE.search(line):
-            unrecognized.append(line)
+            unrecognized.append((line, current_date))
         i += 1
     return results, unrecognized
 
@@ -516,7 +516,7 @@ def parse_sosajang_chat(text, fallback_date):
         if found_store:
             current_store = found_store
         elif _MAYBE_ATTENDANCE_RE.search(line):
-            unrecognized.append(line)
+            unrecognized.append((line, current_date))
     return results, unrecognized
 
 
@@ -699,7 +699,12 @@ def kakao_import_view(user):
             ]
             st.session_state["kakao_parsed"] = parsed
             st.session_state["kakao_parsed_category"] = category
-            st.session_state["kakao_unrecognized"] = unrecognized
+            # 못 읽은 줄도 선택한 연/월에 해당하는 것만 남김
+            # (카톡 파일에는 여러 달이 섞여 있어서, 안 그러면 다른 달 공지까지 전부 쌓임)
+            st.session_state["kakao_unrecognized"] = [
+                ln for ln, d in unrecognized
+                if d and d.year == int(target_year) and d.month == int(target_month)
+            ]
             st.info(f"전체 인식 {len(all_parsed)}건 중 {int(target_year)}년 {int(target_month)}월 대상 {len(parsed)}건만 가져왔어요.")
             if not parsed:
                 st.warning("인식된 근태 내용이 없어요. 형식이 다르면 캡처해서 알려주시면 맞춰드릴게요.")
@@ -714,6 +719,18 @@ def kakao_import_view(user):
             for line in unrecognized:
                 st.text(line)
 
+    # 저장 결과는 화면을 다시 그린 뒤에 보여줘야 해서 세션에 잠깐 담아뒀다가 여기서 표시
+    last = st.session_state.pop("kk_last_result", None)
+    if last:
+        saved_n, unmatched_n = last
+        if saved_n:
+            st.success(f"✅ {saved_n}건 저장되었습니다.")
+        if unmatched_n:
+            st.warning(
+                f"직원을 못 찾아서 저장하지 못한 항목이 {unmatched_n}건 있어요. "
+                "아래에 그 항목들만 남겨뒀으니, '직원'칸에서 사람을 고른 뒤 다시 저장해주세요."
+            )
+
     if parsed and parsed_category == category:
         st.divider()
         st.markdown(f"**미리보기 — {len(parsed)}건 인식됨. 확인하고 틀린 부분은 고친 뒤 저장하세요.**")
@@ -721,9 +738,37 @@ def kakao_import_view(user):
         cat_employees = [e for e in db.list_users(include_inactive=False) if e["category"] == category]
         emp_names = [e["name"] for e in cat_employees]
 
+        def _auto_match(row):
+            if category == "소사장" and row.get("store"):
+                return next((e for e in cat_employees if row["store"] in e["department"]), None)
+            return next((e for e in cat_employees if e["name"] == row.get("name")), None)
+
+        matches = [_auto_match(r) for r in parsed]
+        unmatched_idx = [i for i, m in enumerate(matches) if m is None]
+
+        # 저장했더니 매칭 안 된 게 남았으면, 그 건들만 바로 보이도록 자동으로 켜줌
+        if st.session_state.pop("kk_focus_unmatched", False):
+            st.session_state["kk_only_unmatched"] = True
+
+        only_unmatched = False
+        if unmatched_idx:
+            st.warning(
+                f"⚠️ 직원을 자동으로 못 찾은 항목이 {len(unmatched_idx)}건 있어요. "
+                "이름 오타이거나, 계정이 아직 등록되지 않은 사람일 수 있어요."
+            )
+            only_unmatched = st.checkbox(
+                f"매칭 안 된 {len(unmatched_idx)}건만 보기",
+                key="kk_only_unmatched",
+                help="체크하면 손봐야 하는 것만 보여줘요. 이 상태로 저장하면 보이는 항목만 저장됩니다.",
+            )
+
+        visible = unmatched_idx if only_unmatched else list(range(len(parsed)))
+        st.caption(f"{len(visible)}건 표시 중 (전체 {len(parsed)}건)")
+
         with st.form("kakao_save_form"):
             row_keys = []
-            for idx, row in enumerate(parsed):
+            for idx in visible:
+                row = parsed[idx]
                 with st.container(border=True):
                     st.caption(f"원문: {row['raw']}")
                     c1, c2, c3, c4, c5 = st.columns([1.3, 1.6, 1.3, 1.6, 0.8])
@@ -732,12 +777,7 @@ def kakao_import_view(user):
                             "날짜", value=row["work_date"], key=f"kk_date_{idx}", label_visibility="collapsed"
                         )
                     with c2:
-                        if category == "소사장" and row.get("store"):
-                            match = next(
-                                (e for e in cat_employees if row["store"] in e["department"]), None
-                            )
-                        else:
-                            match = next((e for e in cat_employees if e["name"] == row.get("name")), None)
+                        match = matches[idx]
                         options = ["(직접 선택)"] + emp_names
                         default_idx = options.index(match["name"]) if match and match["name"] in options else 0
                         st.selectbox(
@@ -778,13 +818,14 @@ def kakao_import_view(user):
                 memo = st.session_state.get(f"kk_memo_{idx}", "")
                 db.upsert_attendance(emp["id"], wd.isoformat(), code, memo)
                 saved += 1
-            if saved:
-                st.success(f"{saved}건 저장되었습니다.")
+            st.session_state["kk_last_result"] = (saved, unmatched)
             if unmatched:
-                st.warning(f"직원이 매칭되지 않아 저장하지 않은 항목이 {unmatched}건 있어요. '직원' 항목에서 직접 선택 후 다시 저장해주세요.")
+                # 매칭 안 된 게 남았으면 그 건들만 보이게 화면을 다시 그림
+                st.session_state["kk_focus_unmatched"] = True
             else:
                 del st.session_state["kakao_parsed"]
-                st.rerun()
+                st.session_state.pop("kk_only_unmatched", None)
+            st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -1321,6 +1362,20 @@ def ai_review_view(user):
 
     if st.button("🔍 AI 검토 시작", type="primary", disabled=not (text or "").strip()):
         roster = _roster_for(category)
+        # 카톡 파일에는 보통 여러 달이 통째로 들어있어요.
+        # 고른 달 구간만 잘라서 보내면 요금이 훨씬 적게 나오고 판단도 정확해져요.
+        before = len(text)
+        text, found = ai_review.filter_month(text, int(year), int(month))
+        if found and before > 0:
+            st.caption(
+                f"📄 {before:,}자 중 {int(year)}년 {int(month)}월 구간 {len(text):,}자만 검토해요"
+                f" (약 {100 - int(len(text) / before * 100)}% 절약)"
+            )
+        if not text.strip():
+            st.warning(
+                f"올리신 파일에 {int(year)}년 {int(month)}월 대화가 없어요. 연도·월을 확인해주세요."
+            )
+            st.stop()
         try:
             box = st.empty()
 
