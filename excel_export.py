@@ -84,6 +84,18 @@ def _days_in_month(year, month):
     return calendar.monthrange(year, month)[1]
 
 
+def _display_code(code, memo=""):
+    """
+    근태 항목 목록에 없는 표현은 '기타'로 저장되는데, 그대로 쓰면 원래 뭐였는지 알 수 없습니다.
+    그래서 엑셀에 적을 때는 '기타(휴가)'처럼 원문을 괄호에 남깁니다.
+    """
+    code = str(code or "").strip()
+    memo = str(memo or "").strip()
+    if code == "기타" and memo:
+        return f"기타({memo})"
+    return code
+
+
 # 근태 양식에서 '정상 출근'은 빈칸으로 둡니다 (COUNTIFS가 특이사항만 세기 때문)
 _BLANK_CODES = {"정상출근", "출", "o", "O", ""}
 
@@ -95,7 +107,7 @@ _BLANK_CODES = {"정상출근", "출", "o", "O", ""}
 BONSA_FIRST_ROW, BONSA_LAST_ROW = 6, 34
 
 
-def build_bonsa_form(year, month, roster, records):
+def build_bonsa_form(year, month, roster, records, memos=None):
     """
     roster  : [{'name':..., 'department':...}, ...]  (표시 순서대로)
     records : {(이름, 'YYYY-MM-DD'): 근태코드}
@@ -130,7 +142,7 @@ def build_bonsa_form(year, month, roster, records):
             continue
         if code in _BLANK_CODES:
             continue
-        ws.cell(row=r, column=3 + d.day).value = code
+        ws.cell(row=r, column=3 + d.day).value = _display_code(code, (memos or {}).get((name, dstr)))
         report["written"] += 1
 
     return _save(wb), report
@@ -161,7 +173,7 @@ def _ensure_jikyeong_row_formulas(ws, r):
             ws.cell(row=r, column=c).value = f
 
 
-def build_jikyeong_form(year, month, roster, records, store_order=None):
+def build_jikyeong_form(year, month, roster, records, memos=None, store_order=None):
     """
     roster  : [{'name':..., 'department': 매장명}, ...]
     records : {(이름, 'YYYY-MM-DD'): 상태값}
@@ -228,7 +240,7 @@ def build_jikyeong_form(year, month, roster, records, store_order=None):
             continue
         if code in _BLANK_CODES and code != "출":
             continue
-        wsi.cell(row=rr, column=2 + d.day).value = code
+        wsi.cell(row=rr, column=2 + d.day).value = _display_code(code, (memos or {}).get((name, dstr)))
         report["written"] += 1
 
     return _save(wb), report
@@ -607,7 +619,12 @@ def _make_cell(ref, value, style=None):
         c.set("s", style)
     if value is None or value == "":
         return c
-    if isinstance(value, bool):
+    if isinstance(value, str) and value.startswith("="):
+        # '='로 시작하면 글자가 아니라 수식으로 넣어야 합니다.
+        # (<is>로 넣으면 엑셀이 수식 문자열을 그대로 보여줍니다)
+        f = ET.SubElement(c, f"{{{NS}}}f")
+        f.text = value[1:]
+    elif isinstance(value, bool):
         c.set("t", "b")
         v = ET.SubElement(c, f"{{{NS}}}v")
         v.text = "1" if value else "0"
@@ -623,9 +640,16 @@ def _make_cell(ref, value, style=None):
     return c
 
 
-def _rewrite_row(row_xml, updates_for_row):
-    """행 하나(<row>...</row>)의 XML을 받아 지정된 열들을 갱신한 XML 바이트로 반환"""
-    wrapper = b'<r xmlns="' + NS.encode() + b'">' + row_xml + b"</r>"
+_NSDECL_RE = re.compile(rb'xmlns(?::[A-Za-z0-9_.-]+)?="[^"]*"')
+
+
+def _rewrite_row(row_xml, updates_for_row, extra_ns=b""):
+    """
+    행 하나(<row>...</row>)의 XML을 받아 지정된 열들을 갱신한 XML 바이트로 반환.
+    extra_ns : 워크시트 최상단에 선언된 네임스페이스들(x14ac 등).
+               행 안에 x14ac:dyDescent 같은 속성이 있으면 이게 없으면 파싱이 깨집니다.
+    """
+    wrapper = b'<r xmlns="' + NS.encode() + b'" ' + extra_ns + b">" + row_xml + b"</r>"
     root = ET.fromstring(wrapper)
     row = root[0]
 
@@ -657,9 +681,9 @@ def _rewrite_row(row_xml, updates_for_row):
         row.append(c)
 
     out = ET.tostring(row, encoding="utf-8")
-    # ElementTree가 붙이는 네임스페이스 선언 제거 (부모에 이미 선언되어 있음)
-    out = out.replace(b' xmlns="' + NS.encode() + b'"', b"")
-    return out
+    # ElementTree가 다시 붙이는 네임스페이스 선언 제거 (워크시트 최상단에 이미 선언돼 있음)
+    out = _NSDECL_RE.sub(b"", out)
+    return out.replace(b"<row  ", b"<row ")
 
 
 _ROW_RE = re.compile(rb"<row\b[^>]*/>|<row\b[^>]*>.*?</row>", re.S)
@@ -684,6 +708,16 @@ def inject(xlsx_bytes, sheet_name, updates):
         raise ValueError(f"'{sheet_name}' 시트를 찾을 수 없습니다.")
 
     data = src.read(target)
+
+    # 워크시트 최상단의 네임스페이스 선언을 그대로 가져다 씁니다.
+    # (행 속성에 x14ac:dyDescent 같은 게 있으면 이게 없으면 XML 파싱이 실패)
+    extra_ns, root_tag = b"", re.search(rb"<worksheet\b[^>]*>", data)
+    if root_tag:
+        decls = re.findall(rb'xmlns:[A-Za-z0-9_.-]+="[^"]*"', root_tag.group(0))
+        extra_ns = b" ".join(decls)
+        for pref, uri in re.findall(rb'xmlns:([A-Za-z0-9_.-]+)="([^"]*)"', root_tag.group(0)):
+            ET.register_namespace(pref.decode(), uri.decode())
+
     start = data.find(b"<sheetData")
     if start < 0:
         src.close()
@@ -705,7 +739,7 @@ def inject(xlsx_bytes, sheet_name, updates):
         if rno not in by_row:
             continue
         out.append(data[pos:m.start()])
-        out.append(_rewrite_row(m.group(0), by_row[rno]))
+        out.append(_rewrite_row(m.group(0), by_row[rno], extra_ns))
         pos = m.end()
         touched.add(rno)
     out.append(data[pos:end])
@@ -724,3 +758,316 @@ def inject(xlsx_bytes, sheet_name, updates):
     src.close()
     buf.seek(0)
     return buf.getvalue(), sorted(set(by_row) - touched)
+
+
+# ===========================================================================
+# 올려주신 "내 양식 파일"에 값만 써넣기 (서식·수식·메모·이미지·인쇄설정 100% 보존)
+#
+# openpyxl로 열었다 저장하면 셀 메모·도형·인쇄설정 같은 게 사라집니다.
+# 그래서 원본 파일은 손대지 않고, 값이 들어갈 칸만 XML 수준에서 갈아끼웁니다.
+# ===========================================================================
+
+def _sheet_or_fail(file_bytes, candidates):
+    """양식 파일에서 기대하는 시트를 찾음. 이름이 다르면 어떤 시트가 있는지 알려줌."""
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+    names = wb.sheetnames
+    wb.close()
+    for c in candidates:
+        if c in names:
+            return c
+    raise ValueError(
+        f"'{candidates[0]}' 시트를 찾을 수 없습니다. 이 파일의 시트: {', '.join(names)}"
+    )
+
+
+def _read_keys(file_bytes, sheet, first_row, last_row, col):
+    """양식 안의 명단/매장명을 읽어 {이름: 행번호}로 반환 (수식이면 계산된 값을 읽음)"""
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+    ws = wb[sheet]
+    out = {}
+    for i, row in enumerate(
+        ws.iter_rows(min_row=first_row, max_row=last_row, min_col=col, max_col=col, values_only=True),
+        start=first_row,
+    ):
+        v = row[0]
+        if v not in (None, ""):
+            out[str(v).strip()] = i
+    wb.close()
+    return out
+
+
+def _clear(updates, rows, cols):
+    for r in rows:
+        for c in cols:
+            updates[(r, c)] = None
+
+
+def fill_form_bonsa(file_bytes, year, month, records, memos=None, clear_existing=True):
+    """올린 본사 근태 양식(본사근태 시트 D6:AH34)에 근태를 채웁니다."""
+    sheet = _sheet_or_fail(file_bytes, ["본사근태"])
+    row_of = _read_keys(file_bytes, sheet, BONSA_FIRST_ROW, BONSA_LAST_ROW, 3)  # C열 직원명
+    if not row_of:
+        raise ValueError("양식의 C6:C34에서 직원명을 읽지 못했습니다. 명단이 비어있는 파일인지 확인해주세요.")
+
+    updates = {(3, 2): year, (3, 3): month, (3, 36): year}   # B3=연, C3=월, AJ3=연
+    updates.update(BONSA_DAY_UPDATES())   # 날짜·요일 줄이 그 달에 맞게 자동으로 바뀌도록
+    if clear_existing:
+        _clear(updates, range(BONSA_FIRST_ROW, BONSA_LAST_ROW + 1), range(4, 35))
+
+    report = {"written": 0, "unmatched": [], "roster": len(row_of)}
+    ndays = _days_in_month(year, month)
+    for (name, dstr), code in records.items():
+        r = row_of.get(str(name).strip())
+        if r is None:
+            report["unmatched"].append(f"{dstr} {name}")
+            continue
+        d = _to_date(dstr)
+        if not d or d.year != year or d.month != month or d.day > ndays:
+            continue
+        if code in _BLANK_CODES:
+            continue
+        updates[(r, 3 + d.day)] = _display_code(code, (memos or {}).get((str(name).strip(), dstr)))
+        report["written"] += 1
+
+    out, _ = inject(file_bytes, sheet, updates)
+    return out, report
+
+
+def fill_form_jikyeong(file_bytes, year, month, records, memos=None, clear_existing=True):
+    """올린 직영점 근태 양식(입력하는곳 시트 C6:AG21)에 근태를 채웁니다."""
+    sheet = _sheet_or_fail(file_bytes, ["입력하는곳"])
+    row_of = _read_keys(file_bytes, sheet, JIK_FIRST_ROW, JIK_LAST_ROW, 2)  # B열 직원명(수식→계산값)
+    if not row_of:
+        raise ValueError(
+            "양식의 B6:B21에서 직원명을 읽지 못했습니다. "
+            "엑셀에서 파일을 한 번 열었다가 저장한 뒤 다시 올려주세요."
+        )
+
+    updates = {(3, 2): month, (3, 31): year}   # B3=월, AE3=연
+    updates.update(JIK_DAY_UPDATES())     # 날짜·요일 줄이 그 달에 맞게 자동으로 바뀌도록
+    if clear_existing:
+        _clear(updates, sorted(row_of.values()), range(3, 34))
+
+    report = {"written": 0, "unmatched": [], "roster": len(row_of)}
+    ndays = _days_in_month(year, month)
+    for (name, dstr), code in records.items():
+        r = row_of.get(str(name).strip())
+        if r is None:
+            report["unmatched"].append(f"{dstr} {name}")
+            continue
+        d = _to_date(dstr)
+        if not d or d.year != year or d.month != month or d.day > ndays:
+            continue
+        if code in _BLANK_CODES and code != "출":
+            continue
+        updates[(r, 2 + d.day)] = _display_code(code, (memos or {}).get((str(name).strip(), dstr)))
+        report["written"] += 1
+
+    out, _ = inject(file_bytes, sheet, updates)
+    return out, report
+
+
+def fill_form_sosajang(file_bytes, year, month, store_records, clear_existing=True):
+    """올린 소사장 근태 양식(출첵 시트)에 채웁니다. 하루 2칸(출근보고/퇴근보고)."""
+    sheet = _sheet_or_fail(file_bytes, ["출첵"])
+    raw = _read_keys(file_bytes, sheet, SOSA_FIRST_ROW, SOSA_LAST_ROW, 1)
+    row_of = {norm_store(k): v for k, v in raw.items()}
+    if not row_of:
+        raise ValueError("양식의 A4:A15에서 매장명을 읽지 못했습니다.")
+
+    updates = {(3, 1): f"{month}월"}
+    if clear_existing:
+        cols = []
+        for day in range(1, 32):
+            c = sosajang_day_col(day)
+            cols += [c, c + 1]
+        _clear(updates, sorted(row_of.values()), cols)
+
+    report = {"written": 0, "unmatched": [], "roster": len(row_of)}
+    cand = sorted(row_of)
+    ndays = _days_in_month(year, month)
+    for (store, dstr), vals in store_records.items():
+        key = _match_store(store, cand)
+        if key is None:
+            report["unmatched"].append(f"{dstr} {store}")
+            continue
+        d = _to_date(dstr)
+        if not d or d.year != year or d.month != month or d.day > ndays:
+            continue
+        r, c = row_of[key], sosajang_day_col(d.day)
+        open_code = (vals.get("open") or "").strip()
+        close_code = (vals.get("close") or "").strip()
+        memo = (vals.get("memo") or "").strip()
+        updates[(r, c)] = memo if memo and not open_code else (open_code or None)
+        updates[(r, c + 1)] = close_code or None
+        if open_code or close_code or memo:
+            report["written"] += 1
+
+    out, _ = inject(file_bytes, sheet, updates)
+    return out, report
+
+
+def fill_form_sosajang_perf(file_bytes, year, month, store_records, clear_existing=True):
+    """올린 소사장 실적보고 양식(실적_월 시트 B3:AF19)에 채웁니다."""
+    sheet = _sheet_or_fail(file_bytes, ["실적_월"])
+    raw = _read_keys(file_bytes, sheet, PERF_FIRST_ROW, PERF_LAST_ROW, 1)
+    row_of = {norm_store(k): v for k, v in raw.items()}
+    if not row_of:
+        raise ValueError("양식의 A3:A19에서 매장명을 읽지 못했습니다.")
+
+    updates = {(1, 1): f"{month}월"}
+    if clear_existing:
+        _clear(updates, sorted(row_of.values()), range(2, 33))
+
+    report = {"written": 0, "unmatched": [], "roster": len(row_of)}
+    cand = sorted(row_of)
+    ndays = _days_in_month(year, month)
+    for (store, dstr), vals in store_records.items():
+        key = _match_store(store, cand)
+        if key is None:
+            report["unmatched"].append(f"{dstr} {store}")
+            continue
+        d = _to_date(dstr)
+        if not d or d.year != year or d.month != month or d.day > ndays:
+            continue
+        val = (vals.get("perf") or "").strip()
+        memo = (vals.get("memo") or "").strip()
+        if not val and not memo:
+            continue
+        updates[(row_of[key], 1 + d.day)] = memo if memo and not val else val
+        report["written"] += 1
+
+    out, _ = inject(file_bytes, sheet, updates)
+    return out, report
+
+
+# ===========================================================================
+# 근태 양식(채워진 것)을 거꾸로 읽어오기
+#
+# "근태 양식에 기재된 내용을 기준으로 출퇴근 현황에 반영" 하기 위한 것.
+# 양식을 내려받아 손으로 고치셨다면, 그 고친 내용이 그대로 반영됩니다.
+# ===========================================================================
+
+def _parse_display_code(v):
+    """'기타(재택근무)' → ('기타', '재택근무') / '휴무' → ('휴무', '')"""
+    s = str(v or "").strip()
+    if not s:
+        return "", ""
+    m = re.match(r"^(.+?)\s*\((.+)\)\s*$", s)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    return s, ""
+
+
+def _read_grid(file_bytes, sheet, first_row, last_row, key_col, day_to_col, year, month):
+    """행=대상, 열=날짜인 격자를 읽어 {(대상, 'YYYY-MM-DD'): (코드, 메모)} 로 반환"""
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+    if sheet not in wb.sheetnames:
+        names = ", ".join(wb.sheetnames)
+        wb.close()
+        raise ValueError(f"'{sheet}' 시트를 찾을 수 없습니다. 이 파일의 시트: {names}")
+    ws = wb[sheet]
+    ndays = _days_in_month(year, month)
+    max_col = max(day_to_col(d) for d in range(1, ndays + 1)) + 1
+    out = {}
+    for i, row in enumerate(
+        ws.iter_rows(min_row=first_row, max_row=last_row, min_col=1, max_col=max_col, values_only=True),
+        start=first_row,
+    ):
+        key = row[key_col - 1] if len(row) >= key_col else None
+        if key in (None, ""):
+            continue
+        key = str(key).strip()
+        for day in range(1, ndays + 1):
+            c = day_to_col(day)
+            v = row[c - 1] if len(row) >= c else None
+            code, memo = _parse_display_code(v)
+            if code:
+                out[(key, f"{year:04d}-{month:02d}-{day:02d}")] = (code, memo)
+    wb.close()
+    return out
+
+
+def read_form_bonsa(file_bytes, year, month):
+    """본사 근태 양식 → {(이름, 날짜): 코드}, {(이름, 날짜): 메모}"""
+    sheet = _sheet_or_fail(file_bytes, ["본사근태"])
+    grid = _read_grid(file_bytes, sheet, BONSA_FIRST_ROW, BONSA_LAST_ROW, 3,
+                      lambda d: 3 + d, year, month)
+    return ({k: v[0] for k, v in grid.items()},
+            {k: v[1] for k, v in grid.items() if v[1]})
+
+
+def read_form_jikyeong(file_bytes, year, month):
+    """직영점 근태 양식 → {(이름, 날짜): 코드}, {(이름, 날짜): 메모}"""
+    sheet = _sheet_or_fail(file_bytes, ["입력하는곳"])
+    grid = _read_grid(file_bytes, sheet, JIK_FIRST_ROW, JIK_LAST_ROW, 2,
+                      lambda d: 2 + d, year, month)
+    return ({k: v[0] for k, v in grid.items()},
+            {k: v[1] for k, v in grid.items() if v[1]})
+
+
+def read_form_sosajang(file_bytes, year, month):
+    """소사장 근태 양식(출첵) → {(매장, 날짜): {'open','close','memo'}}"""
+    sheet = _sheet_or_fail(file_bytes, ["출첵"])
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+    ws = wb[sheet]
+    ndays = _days_in_month(year, month)
+    out = {}
+    for i, row in enumerate(
+        ws.iter_rows(min_row=SOSA_FIRST_ROW, max_row=SOSA_LAST_ROW,
+                     min_col=1, max_col=sosajang_day_col(31) + 1, values_only=True),
+        start=SOSA_FIRST_ROW,
+    ):
+        store = row[0]
+        if store in (None, ""):
+            continue
+        store = str(store).strip()
+        for day in range(1, ndays + 1):
+            c = sosajang_day_col(day)
+            o = str(row[c - 1] or "").strip() if len(row) >= c else ""
+            cl = str(row[c] or "").strip() if len(row) > c else ""
+            if not o and not cl:
+                continue
+            key = f"{year:04d}-{month:02d}-{day:02d}"
+            # 규정표에 있는 코드가 아니면 메모(예외 문구)로 간주
+            known = o in ("o", "O", "휴", "휴무", "미", "개인", "휴가", "본사",
+                          "조기마감", "조기퇴근") or "/" in o
+            out[(store, key)] = {
+                "open": o if known else "",
+                "close": cl,
+                "memo": "" if known else o,
+                "perf": ("O" if o in ("o", "O") else o),
+            }
+    wb.close()
+    return out
+
+
+# ===========================================================================
+# 날짜 줄을 '그 달에 맞게' 자동으로 바뀌도록 만들기
+#
+# 양식의 날짜 줄(1~31)이 고정 숫자라, 30일까지인 달에도 31일 칸이 남아 있었습니다.
+# 아래 수식으로 바꾸면 연/월만 바꿔도 없는 날짜는 자동으로 비고, 요일도 따라 바뀝니다.
+#   DATE(연, 월+1, 0) = 그 달의 마지막 날  →  DAY(...) = 그 달의 일수
+# ===========================================================================
+
+def _day_row_updates(day_first_col, day_row, weekday_row, year_ref, month_ref, ndays_max=31):
+    """날짜 줄과 요일 줄을 '연/월에 따라 자동으로 바뀌는 수식'으로 교체할 내용을 만듭니다."""
+    up = {}
+    for day in range(1, ndays_max + 1):
+        c = day_first_col + (day - 1)
+        cl = get_column_letter(c)
+        up[(day_row, c)] = (
+            f"=IF({day}>DAY(DATE({year_ref},{month_ref}+1,0)),\"\",{day})"
+        )
+        if weekday_row:
+            up[(weekday_row, c)] = (
+                f'=IF({cl}{day_row}="","",'
+                f'TEXT(WEEKDAY(DATE({year_ref},{month_ref},{cl}{day_row}),1),"AAA"))'
+            )
+    return up
+
+
+# 본사 근태 양식: 날짜 D5:AH5, 요일 D4:AH4, 연=$AJ$3, 월=$C$3
+BONSA_DAY_UPDATES = lambda: _day_row_updates(4, 5, 4, "$AJ$3", "$C$3")
+# 직영점 근태 양식: 날짜 C5:AG5, 요일 C4:AG4, 연=$AE$3, 월=$B$3
+JIK_DAY_UPDATES = lambda: _day_row_updates(3, 5, 4, "$AE$3", "$B$3")
