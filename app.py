@@ -1152,6 +1152,14 @@ def _report_caption(rep):
     if rep.get("unknown_codes"):
         with st.expander(f"규정표에 없어 메모로만 넣은 코드 {len(rep['unknown_codes'])}건"):
             st.write(rep["unknown_codes"][:100])
+    if rep.get("memo_only"):
+        with st.expander(f"📝 소명건·메모에만 남긴 건 {len(rep['memo_only'])}건 (체크 컬럼 없음)"):
+            st.caption("근무는 했으나 특이사항만 있는 경우예요 (예: 강원출장, 지하철지연).")
+            st.write(rep["memo_only"][:100])
+    if rep.get("multi"):
+        with st.expander(f"✅ 여러 컬럼을 함께 체크한 건 {len(rep['multi'])}건"):
+            st.caption("한 상태에 키워드가 여러 개인 경우예요 (예: 오전반차/무급 → 반차·무급 둘 다).")
+            st.write(rep["multi"][:100])
 
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -1293,6 +1301,16 @@ def excel_export_view(user):
                 st.caption("둘 중 하나만 올리셔도 돼요. 올린 것만 반영됩니다.")
             f1 = st.file_uploader("채울 출퇴근 현황 파일 (.xlsx)", type=["xlsx"], key="exp_st_bj")
             clear1 = st.checkbox("기존에 적혀 있던 G~U 값은 지우고 새로 채우기", True, key="exp_st_bj_clear")
+            nocheck = st.text_input(
+                "체크 컬럼을 비울 인원 (쉼표로 구분)",
+                value=db.get_setting("no_check_names", ""),
+                key="exp_nocheck",
+                help="지문 체크를 하지 않는 분들이에요. 이분들은 소명건·메모에 글자만 남기고 "
+                     "휴무·연차·반차 같은 체크 컬럼은 비워둡니다. 한 번 적어두면 저장돼요.",
+                placeholder="예: 홍길동, 김철수",
+            )
+            if nocheck != db.get_setting("no_check_names", ""):
+                db.set_setting("no_check_names", nocheck)
             if st.button("채우기", key="exp_st_bj_run", use_container_width=True,
                          disabled=(f1 is None),
                          help="위에 출퇴근 현황 파일을 먼저 올려주세요" if f1 is None else None):
@@ -1315,7 +1333,8 @@ def excel_export_view(user):
                         memos = {**mb, **mj}
                     with st.spinner("파일을 채우는 중이에요…"):
                         data, rep = excel_export.fill_status_bonsa_jikyeong(
-                            f1.getvalue(), year, month, recs, memos, clear_existing=clear1
+                            f1.getvalue(), year, month, recs, memos, clear_existing=clear1,
+                            no_check_names=[n.strip() for n in nocheck.split(",")],
                         )
                     rep["source"] = len(recs)
                     st.session_state["exp_st_bj_out"] = (data, rep, f1.name)
@@ -1480,6 +1499,8 @@ def main():
             "category": "본사", "department": "관리팀", "role": "admin"}
 
     st.title("🗂️ (주)대교통신 HR 플랫폼")
+    # 배포된 코드가 최신인지 한눈에 확인하려고 버전을 찍어둡니다.
+    st.caption("버전 2026-08-30 v13")
 
     view_funcs = {
         "kakao": lambda: kakao_import_view(user),
