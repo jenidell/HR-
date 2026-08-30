@@ -39,6 +39,51 @@ def _build_bulk_template():
 
 
 # ---------------------------------------------------------------------------
+# 탭 순서 (관리자가 ▲▼ 버튼으로 자유롭게 바꿀 수 있도록 DB 설정에 저장)
+# ---------------------------------------------------------------------------
+TAB_LABELS = {
+    "bulk": "근태일괄입력",
+    "emp": "근태개별입력",
+    "status": "전체 근태현황",
+    "kakao": "카톡 근태 가져오기",
+    "admin": "직원 계정관리",
+}
+DEFAULT_TAB_ORDER = ["bulk", "emp", "status", "kakao", "admin"]
+_TAB_ORDER_SETTING_KEY = "admin_tab_order"
+
+
+def _get_tab_order():
+    raw = db.get_setting(_TAB_ORDER_SETTING_KEY, "")
+    order = [k for k in raw.split(",") if k in TAB_LABELS] if raw else []
+    for k in DEFAULT_TAB_ORDER:
+        if k not in order:
+            order.append(k)
+    return order
+
+
+def _save_tab_order(order):
+    db.set_setting(_TAB_ORDER_SETTING_KEY, ",".join(order))
+
+
+def tab_order_settings_view():
+    st.caption("▲▼ 버튼을 누르면 바로 저장되고, 탭 순서가 그 자리에서 바뀌어요.")
+    order = _get_tab_order()
+    for i, key in enumerate(order):
+        c1, c2, c3 = st.columns([5, 1, 1])
+        c1.markdown(f"{i + 1}. **{TAB_LABELS[key]}**")
+        if c2.button("▲", key=f"tab_up_{key}", disabled=(i == 0), use_container_width=True):
+            new_order = order[:]
+            new_order[i - 1], new_order[i] = new_order[i], new_order[i - 1]
+            _save_tab_order(new_order)
+            st.rerun()
+        if c3.button("▼", key=f"tab_down_{key}", disabled=(i == len(order) - 1), use_container_width=True):
+            new_order = order[:]
+            new_order[i + 1], new_order[i] = new_order[i], new_order[i + 1]
+            _save_tab_order(new_order)
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # 로그인 / 세션 관리
 # ---------------------------------------------------------------------------
 def login_view():
@@ -545,6 +590,27 @@ def _kakao_calendar_view(category, year, month):
     )
     st.markdown(table_html, unsafe_allow_html=True)
 
+    weekday_kr2 = ["월", "화", "수", "목", "금", "토", "일"]
+    emp_names_by_id = {e["id"]: e["name"] for e in cat_employees}
+    missing_lines = []
+    d = month_start
+    while d <= min(month_end, today):
+        entered_ids = by_date.get(d.isoformat(), set())
+        missing_ids = [uid for uid in emp_names_by_id if uid not in entered_ids]
+        if missing_ids:
+            missing_names = ", ".join(
+                sorted(emp_names_by_id[uid] for uid in missing_ids)
+            )
+            missing_lines.append(f"**{d.month}/{d.day}({weekday_kr2[d.weekday()]})** — {missing_names}")
+        d += timedelta(days=1)
+
+    with st.expander(f"❌⚠️ 날짜별로 아직 안 올라온 사람 보기 ({len(missing_lines)}일)"):
+        if not missing_lines:
+            st.caption("이번 달은 지난 날짜 전부 등록된 인원 전원이 반영됐어요!")
+        else:
+            for line in missing_lines:
+                st.markdown(line)
+
 
 def kakao_import_view(user):
     st.subheader("카톡 근태 가져오기")
@@ -927,6 +993,10 @@ def admin_status_view(user):
 # 관리자용: 직원 계정 관리
 # ---------------------------------------------------------------------------
 def admin_accounts_view(user):
+    with st.expander("🔀 탭 순서 바꾸기"):
+        tab_order_settings_view()
+
+    st.divider()
     st.subheader("직원 계정 추가")
 
     c1, c2 = st.columns(2)
@@ -1165,26 +1235,26 @@ def main():
 
     st.title("🗂️ (주)대교통신 HR 플랫폼")
 
+    view_funcs = {
+        "bulk": lambda: bulk_entry_view(user),
+        "emp": lambda: employee_view(user),
+        "status": lambda: admin_status_view(user),
+        "kakao": lambda: kakao_import_view(user),
+        "admin": lambda: admin_accounts_view(user),
+    }
+
     if user["role"] == "admin":
-        tab_bulk, tab_emp, tab_status, tab_kakao, tab_admin = st.tabs(
-            ["근태일괄입력", "근태개별입력", "전체 근태현황", "카톡 근태 가져오기", "직원 계정관리"]
-        )
-        with tab_bulk:
-            bulk_entry_view(user)
-        with tab_emp:
-            employee_view(user)
-        with tab_status:
-            admin_status_view(user)
-        with tab_kakao:
-            kakao_import_view(user)
-        with tab_admin:
-            admin_accounts_view(user)
+        order = _get_tab_order()
     else:
-        tab_bulk, tab_emp = st.tabs(["근태일괄입력", "근태개별입력"])
-        with tab_bulk:
-            bulk_entry_view(user)
-        with tab_emp:
-            employee_view(user)
+        # 일반 직원은 근태일괄입력·근태개별입력 2개만, 관리자가 정한 순서를 그대로 따름
+        order = [k for k in _get_tab_order() if k in ("bulk", "emp")]
+        if not order:
+            order = ["bulk", "emp"]
+
+    tabs = st.tabs([TAB_LABELS[k] for k in order])
+    for tab, key in zip(tabs, order):
+        with tab:
+            view_funcs[key]()
 
 
 if __name__ == "__main__":
