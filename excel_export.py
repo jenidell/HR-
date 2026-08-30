@@ -217,14 +217,43 @@ def _build_index(file_bytes, sheet_name, key_col_a, key_col_b, first_row):
 # (2-1) 출퇴근 현황(본사·직영) — '▶ 데이터' 탭 G~U열
 # ---------------------------------------------------------------------------
 
+STATUS_BJ_SOMYEONG_COL = 7    # G 소명건
+
+def _status_text(code, memo=""):
+    """규정 4장의 '원문 텍스트' — G열(소명건)·U열(메모)에 그대로 남길 문구"""
+    code = str(code or "").strip()
+    memo = str(memo or "").strip()
+    if code == "기타":
+        return memo or code
+    return f"{code}/{memo}" if memo else code
+
+
+def _bj_check_hits(text):
+    """상태 텍스트 안에 들어있는 키워드를 '모두' 찾아 [(열, 값)]로 반환.
+    규정: 하나의 상태에 여러 키워드가 있으면(예: '오전반차/무급') 해당 컬럼을 전부 체크."""
+    hits = []
+    for kw, (col, val) in STATUS_BJ_MAP.items():
+        if kw in text and (col, val) not in hits:
+            hits.append((col, val))
+    return hits
+
+
 def fill_status_bonsa_jikyeong(file_bytes, year, month, records, memos=None,
-                               clear_existing=True):
+                               clear_existing=True, no_check_names=None):
     """
-    올린 '출퇴근 현황(본사·직영)' 파일의 ▶데이터 탭 G~U열을 DB 기준으로 채웁니다.
-    records : {(이름, 'YYYY-MM-DD'): 근태코드}
-    memos   : {(이름, 'YYYY-MM-DD'): 메모}
+    올린 '출퇴근 현황(본사·직영)' 파일의 ▶데이터 탭 G~U열을 채웁니다.
+
+    '본사 근태 데이터 처리 규정' 4장을 그대로 따릅니다.
+      · 정상 출근일('출' 또는 공란)은 건드리지 않는다
+      · 그 외 상태는 G열(소명건)과 U열(메모)에 원문 텍스트를 그대로 남긴다
+      · 키워드가 여러 개면(예: '오전반차/무급') 해당 체크 컬럼을 모두 체크한다
+      · 근무는 했으나 특이사항만 있는 경우(예: '강원출장')는 G·U열에만 남기고 체크는 비운다
+
+    no_check_names : 지문 체크를 하지 않는 인원. 이분들은 소명건·메모만 남기고
+                     체크 컬럼은 비웁니다 (규정 5-2 예외 처리).
     """
     memos = memos or {}
+    no_check = {str(n).strip() for n in (no_check_names or []) if str(n).strip()}
     raw = _build_index(file_bytes, STATUS_BJ_SHEET,
                        STATUS_BJ_NAME_COL, STATUS_BJ_DATE_COL,
                        STATUS_BJ_HEADER_ROW + 1)
@@ -239,14 +268,20 @@ def fill_status_bonsa_jikyeong(file_bytes, year, month, records, memos=None,
             "엑셀에서 파일을 한 번 열었다가 저장한 뒤 다시 올려주세요."
         )
 
-    report = {"written": 0, "unmatched": [], "rows": len(index)}
+    report = {"written": 0, "unmatched": [], "rows": len(index),
+              "memo_only": [], "multi": []}
     updates = {}
+    all_check_cols = sorted({c for c, _ in STATUS_BJ_MAP.values()})
 
+    # 이번 달에 우리가 근태를 아는 사람만 초기화 대상 (모르는 사람 기록은 건드리지 않음)
     if clear_existing:
-        for r in set(index.values()):
-            for c, _ in STATUS_BJ_MAP.values():
-                updates[(r, c)] = None
-            updates[(r, STATUS_BJ_MEMO_COL)] = None
+        known = {str(n).strip() for (n, _) in records}
+        for (name, d), r in index.items():
+            if name in known and d.year == year and d.month == month:
+                for c in all_check_cols:
+                    updates[(r, c)] = None
+                updates[(r, STATUS_BJ_SOMYEONG_COL)] = None
+                updates[(r, STATUS_BJ_MEMO_COL)] = None
 
     for (name, dstr), code in records.items():
         d = _to_date(dstr)
@@ -256,19 +291,27 @@ def fill_status_bonsa_jikyeong(file_bytes, year, month, records, memos=None,
         if r is None:
             report["unmatched"].append(f"{dstr} {name}")
             continue
-        hit = STATUS_BJ_MAP.get(code)
-        if hit:
-            updates[(r, hit[0])] = hit[1]
-            report["written"] += 1
-        memo = memos.get((name, dstr)) or ""
-        if not hit and code not in _BLANK_CODES:
-            # 표에 없는 코드는 임의로 버리지 말고 메모로 남겨 담당자가 판단하게 함
-            memo = (code + (" / " + memo if memo else "")).strip()
-        if memo:
-            updates[(r, STATUS_BJ_MEMO_COL)] = memo
 
-    out, missing_rows = inject(file_bytes, STATUS_BJ_SHEET, updates)
-    report["rows_not_found"] = missing_rows
+        # 정상 출근일은 규정상 손대지 않음
+        if str(code or "").strip() in _BLANK_CODES and not (memos.get((name, dstr)) or "").strip():
+            continue
+
+        text = _status_text(code, memos.get((name, dstr)))
+        # 지문 체크를 안 하는 인원은 글자만 남기고 체크 컬럼은 비웁니다
+        hits = [] if str(name).strip() in no_check else _bj_check_hits(text)
+        for c, v in hits:
+            updates[(r, c)] = v
+        # 원문 텍스트는 소명건(G)·메모(U) 양쪽에
+        updates[(r, STATUS_BJ_SOMYEONG_COL)] = text
+        updates[(r, STATUS_BJ_MEMO_COL)] = text
+        report["written"] += 1
+        if not hits:
+            tag = " (체크 제외 인원)" if str(name).strip() in no_check else ""
+            report["memo_only"].append(f"{dstr} {name}: {text}{tag}")
+        elif len(hits) > 1:
+            report["multi"].append(f"{dstr} {name}: {text}")
+
+    out, _ = inject(file_bytes, STATUS_BJ_SHEET, updates)
     return out, report
 
 
