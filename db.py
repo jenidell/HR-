@@ -1,6 +1,6 @@
 """
 db.py
-(주)대교통신 사내 HR 플랫폼 - 데이터베이스 계층
+대교통신 사내 HR 플랫폼 - 데이터베이스 계층
 
 지금은 SQLite로 동작합니다 (파일 하나로 끝나서 개발/소규모 운영에 충분).
 70명 규모로 정식 운영하거나 Streamlit Community Cloud처럼 파일이
@@ -148,6 +148,33 @@ def list_users(include_inactive=False):
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def list_users_by_department(department: str):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, username, name, department, role FROM users WHERE active = 1 AND department = ? ORDER BY name",
+        (department,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_attendance_for_date(work_date: str, department: str = None):
+    """특정 날짜에 이미 입력된 근태를 user_id -> {code, memo}로 반환 (일괄입력 화면에서 기존값 미리 채우는 용도)"""
+    conn = get_conn()
+    q = """
+        SELECT a.user_id, a.code, a.memo
+        FROM attendance a JOIN users u ON a.user_id = u.id
+        WHERE a.work_date = ?
+    """
+    params = [work_date]
+    if department:
+        q += " AND u.department = ?"
+        params.append(department)
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return {r["user_id"]: {"code": r["code"], "memo": r["memo"]} for r in rows}
 
 
 def deactivate_user(user_id: int):
