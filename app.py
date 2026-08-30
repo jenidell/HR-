@@ -363,23 +363,41 @@ _KAKAO_STATUS_MAP = {
 
 _DATE_DIVIDER_RE = re.compile(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일")
 
+# 카카오톡 "대화 내보내기" .txt 파일은 메시지 첫 줄이 "[보낸사람] [오전/오후 시:분] 내용" 형태로 시작함.
+# 화면에서 복사해서 붙여넣을 땐 이 접두어가 없을 수도 있어서, 있으면 제거하고 없으면 그대로 둠.
+_SENDER_PREFIX_RE = re.compile(r"^\[.+?\]\s*\[(?:오전|오후)\s*\d{1,2}:\d{2}\]\s*")
+
+_STATUS_TIME_MEMO = {"오전반차": "오전", "오후반차": "오후"}
+
+
+def _strip_kakao_prefix(raw_line):
+    return _SENDER_PREFIX_RE.sub("", raw_line, count=1).strip()
+
 
 def parse_headquarters_chat(text, fallback_date):
-    """본사 카톡 형식: "8월 28일 (금) 전산팀 출근현황" 헤더 다음 "이름 : 상태" 줄들"""
+    """본사 카톡 형식: "8월 28일 (금) 전산팀 출근현황" 헤더 다음 "이름 : 상태" 줄들.
+    "-이름 : 상태"처럼 앞에 - 가 붙는 경우, 카카오톡 대화 내보내기 [보낸사람] [시간] 접두어도 처리."""
     header_re = re.compile(r"(\d{1,2})월\s*(\d{1,2})일.*?(?:출근현황|근태)")
-    name_status_re = re.compile(r"^\s*([가-힣A-Za-z0-9]+)\s*[:：]\s*(.+?)\s*$")
+    name_status_re = re.compile(r"^\s*-?\s*([가-힣A-Za-z0-9]+)\s*[:：]\s*(.+?)\s*$")
 
     results = []
     current_date = fallback_date
     for raw in text.splitlines():
-        line = raw.strip()
+        line = _strip_kakao_prefix(raw)
         if not line:
+            continue
+        dm = _DATE_DIVIDER_RE.search(line)
+        if dm:
+            try:
+                current_date = date(int(dm.group(1)), int(dm.group(2)), int(dm.group(3)))
+            except ValueError:
+                pass
             continue
         hm = header_re.search(line)
         if hm:
             month, day = int(hm.group(1)), int(hm.group(2))
             try:
-                current_date = date(fallback_date.year, month, day)
+                current_date = date(current_date.year, month, day)
             except ValueError:
                 pass
             continue
@@ -390,7 +408,7 @@ def parse_headquarters_chat(text, fallback_date):
             results.append({
                 "raw": line, "name": name, "store": None,
                 "work_date": current_date, "code": code or "기타",
-                "memo": "" if code else status_text,
+                "memo": _STATUS_TIME_MEMO.get(status_text, "" if code else status_text),
             })
     return results
 
@@ -401,7 +419,7 @@ def parse_jikyeong_chat(text, fallback_date):
     time_line_re = re.compile(r"^\d{1,2}시\s*(.+)$")
     end_re = re.compile(r"^이상입니다\s*$")
 
-    lines = [l.strip() for l in text.splitlines()]
+    lines = [_strip_kakao_prefix(l) for l in text.splitlines()]
     results = []
     current_date = fallback_date
     i = 0
@@ -458,7 +476,7 @@ def parse_sosajang_chat(text, fallback_date):
     current_date = fallback_date
     current_store = None
     for raw in text.splitlines():
-        line = raw.strip()
+        line = _strip_kakao_prefix(raw)
         if not line:
             continue
 
@@ -505,36 +523,65 @@ _KAKAO_EXAMPLES = {
 }
 
 
+def _decode_uploaded_text(uploaded_file):
+    raw_bytes = uploaded_file.getvalue()
+    for enc in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
+        try:
+            return raw_bytes.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw_bytes.decode("utf-8", errors="ignore")
+
+
 def kakao_import_view(user):
     st.subheader("카톡 근태 가져오기")
     st.caption(
-        "카톡방(본사/직영/소사장)에 매일 올라오는 근태 메시지를 그대로 붙여넣으면 근태표 형식으로 정리해서 "
-        "미리 보여드려요. 확인하고 저장하면 '근태표 양식 엑셀 다운로드'에도 바로 반영돼요. "
+        "카톡방(본사/직영/소사장)에서 '대화 내보내기'로 받은 .txt 파일을 통째로 올리면, 그중 아래에서 고른 "
+        "달(월)의 근태만 걸러서 정리해드려요. 확인하고 저장하면 '근태표 양식 엑셀 다운로드'에도 바로 반영돼요. "
         "직원들은 지금처럼 카톡에만 올리면 되고, 따로 앱에 입력할 필요 없어요."
     )
 
     category = st.selectbox("구분", db.CATEGORIES, key="kakao_category")
-    fallback_date = st.date_input(
-        "대화 내용에 날짜가 안 나올 때 쓸 기본 날짜", value=date.today(), key="kakao_fallback_date"
+    c1, c2 = st.columns(2)
+    with c1:
+        target_year = st.number_input(
+            "가져올 연도", min_value=2020, max_value=2100, value=date.today().year, step=1, key="kakao_year"
+        )
+    with c2:
+        target_month = st.number_input(
+            "가져올 월", min_value=1, max_value=12, value=date.today().month, step=1, key="kakao_month"
+        )
+    st.caption(f"→ {int(target_year)}년 {int(target_month)}월 근태만 걸러서 가져와요. 나머지 달 내용은 자동으로 무시됩니다.")
+
+    uploaded = st.file_uploader(
+        "카톡 대화 파일 업로드 (.txt, 카카오톡 '대화 내보내기')", type=["txt"], key="kakao_file"
     )
     chat_text = st.text_area(
-        "카톡 대화 내용 붙여넣기", height=220,
+        "또는 카톡 대화 내용 직접 붙여넣기", height=180,
         placeholder=f"예시:\n{_KAKAO_EXAMPLES[category]}", key="kakao_text",
     )
 
     if st.button("미리보기", key="kakao_preview_btn", use_container_width=True):
-        if not chat_text.strip():
-            st.warning("붙여넣은 내용이 없습니다.")
+        source_text = _decode_uploaded_text(uploaded) if uploaded is not None else chat_text
+        if not source_text or not source_text.strip():
+            st.warning("파일을 올리거나 대화 내용을 붙여넣어주세요.")
             st.session_state.pop("kakao_parsed", None)
         else:
+            fallback_date = date(int(target_year), int(target_month), 1)
             if category == "본사":
-                parsed = parse_headquarters_chat(chat_text, fallback_date)
+                all_parsed = parse_headquarters_chat(source_text, fallback_date)
             elif category == "직영":
-                parsed = parse_jikyeong_chat(chat_text, fallback_date)
+                all_parsed = parse_jikyeong_chat(source_text, fallback_date)
             else:
-                parsed = parse_sosajang_chat(chat_text, fallback_date)
+                all_parsed = parse_sosajang_chat(source_text, fallback_date)
+
+            parsed = [
+                r for r in all_parsed
+                if r["work_date"].year == int(target_year) and r["work_date"].month == int(target_month)
+            ]
             st.session_state["kakao_parsed"] = parsed
             st.session_state["kakao_parsed_category"] = category
+            st.info(f"전체 인식 {len(all_parsed)}건 중 {int(target_year)}년 {int(target_month)}월 대상 {len(parsed)}건만 가져왔어요.")
             if not parsed:
                 st.warning("인식된 근태 내용이 없어요. 형식이 다르면 캡처해서 알려주시면 맞춰드릴게요.")
 
