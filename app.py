@@ -56,7 +56,15 @@ _TAB_ORDER_SETTING_KEY = "admin_tab_order"
 
 def _get_tab_order():
     raw = db.get_setting(_TAB_ORDER_SETTING_KEY, "")
-    order = [k for k in raw.split(",") if k in TAB_LABELS] if raw else []
+    saved = [k for k in raw.split(",") if k] if raw else []
+    known = [k for k in saved if k in TAB_LABELS]
+
+    # 탭을 합치거나 없애서 구성이 바뀌면, 예전에 저장된 순서는 의미가 없으므로
+    # 기본(업무 흐름) 순서로 되돌립니다. 이후 다시 드래그하면 그 순서가 저장돼요.
+    if saved and len(known) != len(saved):
+        return list(DEFAULT_TAB_ORDER)
+
+    order = known
     for k in DEFAULT_TAB_ORDER:
         if k not in order:
             order.append(k)
@@ -75,10 +83,19 @@ def tab_order_settings_view():
     )
     order = _get_tab_order()
     current_labels = [TAB_LABELS[k] for k in order]
-    new_labels = sort_items(current_labels, direction="vertical", key="tab_order_sortable")
-    if new_labels != current_labels:
-        label_to_key = {v: k for k, v in TAB_LABELS.items()}
-        new_order = [label_to_key[l] for l in new_labels]
+
+    # 탭 구성이 바뀌면(탭을 합치거나 없앴을 때) 드래그 위젯에 예전 목록이 남아 오류가 났었습니다.
+    # 위젯 key에 현재 탭 구성을 넣어, 구성이 바뀌면 위젯도 새로 만들어지게 합니다.
+    widget_key = "tab_order_sortable_" + "_".join(order)
+    new_labels = sort_items(current_labels, direction="vertical", key=widget_key)
+
+    label_to_key = {v: k for k, v in TAB_LABELS.items()}
+    # 지금 없는 탭 이름이 섞여 들어와도 그냥 무시 (예전 목록이 남아있는 경우 대비)
+    new_order = [label_to_key[l] for l in (new_labels or []) if l in label_to_key]
+    for k in order:
+        if k not in new_order:
+            new_order.append(k)
+    if new_order != order:
         _save_tab_order(new_order)
         st.rerun()
 
