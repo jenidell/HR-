@@ -107,46 +107,6 @@ _BLANK_CODES = {"정상출근", "출", "o", "O", ""}
 BONSA_FIRST_ROW, BONSA_LAST_ROW = 6, 34
 
 
-def build_bonsa_form(year, month, roster, records, memos=None):
-    """
-    roster  : [{'name':..., 'department':...}, ...]  (표시 순서대로)
-    records : {(이름, 'YYYY-MM-DD'): 근태코드}
-    """
-    wb = _tpl("본사")
-    ws = wb["본사근태"]
-    ws["B3"] = year
-    ws["C3"] = month
-    ws["AJ3"] = year
-
-    report = {"written": 0, "skipped_rows": 0, "unmatched": []}
-    capacity = BONSA_LAST_ROW - BONSA_FIRST_ROW + 1
-    if len(roster) > capacity:
-        report["skipped_rows"] = len(roster) - capacity
-        roster = roster[:capacity]
-
-    ndays = _days_in_month(year, month)
-    row_of = {}
-    for i, emp in enumerate(roster):
-        r = BONSA_FIRST_ROW + i
-        ws.cell(row=r, column=2).value = emp.get("department") or ""
-        ws.cell(row=r, column=3).value = emp.get("name") or ""
-        row_of[emp.get("name")] = r
-
-    for (name, dstr), code in records.items():
-        r = row_of.get(name)
-        if r is None:
-            report["unmatched"].append(f"{dstr} {name}")
-            continue
-        d = _to_date(dstr)
-        if not d or d.year != year or d.month != month or d.day > ndays:
-            continue
-        if code in _BLANK_CODES:
-            continue
-        ws.cell(row=r, column=3 + d.day).value = _display_code(code, (memos or {}).get((name, dstr)))
-        report["written"] += 1
-
-    return _save(wb), report
-
 
 # ---------------------------------------------------------------------------
 # (1-2) 직영점 근태 양식
@@ -173,78 +133,6 @@ def _ensure_jikyeong_row_formulas(ws, r):
             ws.cell(row=r, column=c).value = f
 
 
-def build_jikyeong_form(year, month, roster, records, memos=None, store_order=None):
-    """
-    roster  : [{'name':..., 'department': 매장명}, ...]
-    records : {(이름, 'YYYY-MM-DD'): 상태값}
-    매장별로 묶어서 배치하고, 매장 사이에는 원래 양식처럼 한 줄 비워둡니다.
-    """
-    wb = _tpl("직영")
-    wsi = wb["입력하는곳"]
-    wsy = wb["요약"]
-    wsi["B3"] = month
-    wsi["AE3"] = year
-
-    report = {"written": 0, "skipped_rows": 0, "unmatched": []}
-
-    # 매장별로 그룹핑
-    groups = {}
-    for emp in roster:
-        groups.setdefault(emp.get("department") or "", []).append(emp)
-    order = [s for s in (store_order or []) if s in groups]
-    order += [s for s in groups if s not in order]
-
-    # 요약 시트에 명단 기록 (입력하는곳 B열 수식이 여기를 참조)
-    sum_row = JIK_SUMMARY_FIRST_ROW
-    summary_row_of = {}
-    for store in order:
-        for emp in groups[store]:
-            wsy.cell(row=sum_row, column=12).value = emp.get("name")   # L
-            wsy.cell(row=sum_row, column=13).value = store              # M
-            summary_row_of[emp.get("name")] = sum_row
-            sum_row += 1
-
-    # 입력하는곳에 매장 그룹별로 배치 (그룹 사이 한 줄 비움).
-    # 인원이 많아서 빈 줄까지 넣으면 자리가 모자라면, 빈 줄은 포기하고 인원을 우선한다.
-    capacity = JIK_LAST_ROW - JIK_FIRST_ROW + 1
-    total_people = sum(len(groups[s]) for s in order)
-    use_gaps = (total_people + max(0, len(order) - 1)) <= capacity
-    report["gaps_dropped"] = not use_gaps
-
-    r = JIK_FIRST_ROW
-    row_of = {}
-    for gi, store in enumerate(order):
-        if gi > 0 and use_gaps:
-            r += 1  # 매장 사이 빈 줄
-        for emp in groups[store]:
-            if r > JIK_LAST_ROW:
-                report["skipped_rows"] += 1
-                continue
-            _ensure_jikyeong_row_formulas(wsi, r)
-            wsi.cell(row=r, column=2).value = f"=요약!L{summary_row_of[emp['name']]}"
-            row_of[emp["name"]] = r
-            r += 1
-
-    # 남은 행 정리
-    for rr in range(r, JIK_LAST_ROW + 1):
-        wsi.cell(row=rr, column=2).value = None
-
-    ndays = _days_in_month(year, month)
-    for (name, dstr), code in records.items():
-        rr = row_of.get(name)
-        if rr is None:
-            report["unmatched"].append(f"{dstr} {name}")
-            continue
-        d = _to_date(dstr)
-        if not d or d.year != year or d.month != month or d.day > ndays:
-            continue
-        if code in _BLANK_CODES and code != "출":
-            continue
-        wsi.cell(row=rr, column=2 + d.day).value = _display_code(code, (memos or {}).get((name, dstr)))
-        report["written"] += 1
-
-    return _save(wb), report
-
 
 # ---------------------------------------------------------------------------
 # (1-3) 소사장 근태 양식 (출첵) — 하루 2칸
@@ -260,41 +148,6 @@ def sosajang_day_col(day):
     return 33 + 2 * (day - 16)        # AG,AI ... BK
 
 
-def build_sosajang_form(year, month, store_records):
-    """store_records : {(매장명, 'YYYY-MM-DD'): {'open':..., 'close':..., 'memo':...}}"""
-    wb = _tpl("소사장")
-    ws = wb["출첵"]
-    ws["A3"] = f"{month}월"
-
-    report = {"written": 0, "unmatched": []}
-    row_of, cand = {}, []
-    for r in range(SOSA_FIRST_ROW, SOSA_LAST_ROW + 1):
-        v = ws.cell(row=r, column=1).value
-        if v:
-            n = norm_store(v)
-            row_of[n] = r
-            cand.append(n)
-
-    ndays = _days_in_month(year, month)
-    for (store, dstr), vals in store_records.items():
-        key = _match_store(store, cand)
-        if key is None:
-            report["unmatched"].append(f"{dstr} {store}")
-            continue
-        d = _to_date(dstr)
-        if not d or d.year != year or d.month != month or d.day > ndays:
-            continue
-        r, c = row_of[key], sosajang_day_col(d.day)
-        open_code = (vals.get("open") or "").strip()
-        close_code = (vals.get("close") or "").strip()
-        memo = (vals.get("memo") or "").strip()
-        ws.cell(row=r, column=c).value = memo if memo and not open_code else (open_code or None)
-        ws.cell(row=r, column=c + 1).value = close_code or None
-        if open_code or close_code or memo:
-            report["written"] += 1
-
-    return _save(wb), report
-
 
 # ---------------------------------------------------------------------------
 # (1-4) 소사장 실적보고 양식 (실적_월) — 하루 1칸
@@ -302,39 +155,6 @@ def build_sosajang_form(year, month, store_records):
 
 PERF_FIRST_ROW, PERF_LAST_ROW = 3, 19
 
-
-def build_sosajang_perf_form(year, month, store_records):
-    """store_records : {(매장명, 'YYYY-MM-DD'): {'perf':..., 'memo':...}}"""
-    wb = _tpl("소사장실적")
-    ws = wb["실적_월"]
-    ws["A1"] = f"{month}월"
-
-    report = {"written": 0, "unmatched": []}
-    row_of, cand = {}, []
-    for r in range(PERF_FIRST_ROW, PERF_LAST_ROW + 1):
-        v = ws.cell(row=r, column=1).value
-        if v:
-            n = norm_store(v)
-            row_of[n] = r
-            cand.append(n)
-
-    ndays = _days_in_month(year, month)
-    for (store, dstr), vals in store_records.items():
-        key = _match_store(store, cand)
-        if key is None:
-            report["unmatched"].append(f"{dstr} {store}")
-            continue
-        d = _to_date(dstr)
-        if not d or d.year != year or d.month != month or d.day > ndays:
-            continue
-        val = (vals.get("perf") or "").strip()
-        memo = (vals.get("memo") or "").strip()
-        if not val and not memo:
-            continue
-        ws.cell(row=row_of[key], column=1 + d.day).value = memo if memo and not val else val
-        report["written"] += 1
-
-    return _save(wb), report
 
 
 # ---------------------------------------------------------------------------
@@ -1071,3 +891,127 @@ def _day_row_updates(day_first_col, day_row, weekday_row, year_ref, month_ref, n
 BONSA_DAY_UPDATES = lambda: _day_row_updates(4, 5, 4, "$AJ$3", "$C$3")
 # 직영점 근태 양식: 날짜 C5:AG5, 요일 C4:AG4, 연=$AE$3, 월=$B$3
 JIK_DAY_UPDATES = lambda: _day_row_updates(3, 5, 4, "$AE$3", "$B$3")
+
+
+def build_bonsa_form(year, month, roster, records, memos=None):
+    """앱에 들어있는 본사 양식에 명단과 근태를 채웁니다 (서식·수식·메모 100% 보존)."""
+    data = templates_data.get_template_bytes("본사")
+    report = {"written": 0, "skipped_rows": 0, "unmatched": []}
+
+    capacity = BONSA_LAST_ROW - BONSA_FIRST_ROW + 1
+    if len(roster) > capacity:
+        report["skipped_rows"] = len(roster) - capacity
+        roster = roster[:capacity]
+
+    updates = {(3, 2): year, (3, 3): month, (3, 36): year}
+    updates.update(BONSA_DAY_UPDATES())
+    row_of = {}
+    for i, emp in enumerate(roster):
+        r = BONSA_FIRST_ROW + i
+        updates[(r, 2)] = emp.get("department") or ""
+        updates[(r, 3)] = emp.get("name") or ""
+        row_of[emp.get("name")] = r
+    for r in range(BONSA_FIRST_ROW + len(roster), BONSA_LAST_ROW + 1):
+        updates[(r, 2)] = None
+        updates[(r, 3)] = None
+
+    ndays = _days_in_month(year, month)
+    for (name, dstr), code in records.items():
+        r = row_of.get(name)
+        if r is None:
+            report["unmatched"].append(f"{dstr} {name}")
+            continue
+        d = _to_date(dstr)
+        if not d or d.year != year or d.month != month or d.day > ndays:
+            continue
+        if code in _BLANK_CODES:
+            continue
+        updates[(r, 3 + d.day)] = _display_code(code, (memos or {}).get((name, dstr)))
+        report["written"] += 1
+
+    out, _ = inject(data, "본사근태", updates)
+    return out, report
+
+
+def build_jikyeong_form(year, month, roster, records, memos=None, store_order=None):
+    """앱에 들어있는 직영점 양식에 명단과 근태를 채웁니다 (서식·수식·메모 100% 보존)."""
+    data = templates_data.get_template_bytes("직영")
+    report = {"written": 0, "skipped_rows": 0, "unmatched": []}
+
+    groups = {}
+    for emp in roster:
+        groups.setdefault(emp.get("department") or "", []).append(emp)
+    order = [s for s in (store_order or []) if s in groups]
+    order += [s for s in groups if s not in order]
+
+    # 1) 요약 시트에 명단 기록 (입력하는곳 B열 수식이 여기를 참조)
+    sum_up, sum_row, summary_row_of = {}, JIK_SUMMARY_FIRST_ROW, {}
+    for store in order:
+        for emp in groups[store]:
+            sum_up[(sum_row, 12)] = emp.get("name")
+            sum_up[(sum_row, 13)] = store
+            summary_row_of[emp.get("name")] = sum_row
+            sum_row += 1
+    for r in range(sum_row, JIK_SUMMARY_FIRST_ROW + 20):
+        sum_up[(r, 12)] = None
+        sum_up[(r, 13)] = None
+    data, _ = inject(data, "요약", sum_up)
+
+    # 2) 입력하는곳 배치 (자리가 모자라면 매장 사이 빈 줄 생략)
+    capacity = JIK_LAST_ROW - JIK_FIRST_ROW + 1
+    total_people = sum(len(groups[s]) for s in order)
+    use_gaps = (total_people + max(0, len(order) - 1)) <= capacity
+    report["gaps_dropped"] = not use_gaps
+
+    updates = {(3, 2): month, (3, 31): year}
+    updates.update(JIK_DAY_UPDATES())
+    r, row_of = JIK_FIRST_ROW, {}
+    for gi, store in enumerate(order):
+        if gi > 0 and use_gaps:
+            r += 1
+        for emp in groups[store]:
+            if r > JIK_LAST_ROW:
+                report["skipped_rows"] += 1
+                continue
+            updates[(r, 1)] = "=IFERROR(VLOOKUP(B:B,요약!L:M,2,0),0)"
+            updates[(r, 2)] = f"=요약!L{summary_row_of[emp['name']]}"
+            updates[(r, 35)] = f"=COUNTIFS(C{r}:AG{r},AI$5)"
+            updates[(r, 36)] = f"=COUNTIFS(C{r}:AG{r},AJ$5)"
+            updates[(r, 37)] = f"=COUNTIFS(C{r}:AG{r},AK$5)"
+            updates[(r, 38)] = f"=$AK$3-AI{r}"
+            updates[(r, 39)] = f'=COUNTIFS(C{r}:AG{r},"지각")'
+            updates[(r, 40)] = f"=SUM(AI{r}:AK{r})"
+            row_of[emp["name"]] = r
+            r += 1
+    for rr in range(r, JIK_LAST_ROW + 1):
+        updates[(rr, 2)] = None
+
+    ndays = _days_in_month(year, month)
+    for (name, dstr), code in records.items():
+        rr = row_of.get(name)
+        if rr is None:
+            report["unmatched"].append(f"{dstr} {name}")
+            continue
+        d = _to_date(dstr)
+        if not d or d.year != year or d.month != month or d.day > ndays:
+            continue
+        if code in _BLANK_CODES and code != "출":
+            continue
+        updates[(rr, 2 + d.day)] = _display_code(code, (memos or {}).get((name, dstr)))
+        report["written"] += 1
+
+    out, _ = inject(data, "입력하는곳", updates)
+    return out, report
+
+
+def build_sosajang_form(year, month, store_records):
+    """앱에 들어있는 소사장 근태 양식(출첵)에 채웁니다. 매장명은 양식에 이미 있습니다."""
+    return fill_form_sosajang(templates_data.get_template_bytes("소사장"),
+                              year, month, store_records)
+
+
+def build_sosajang_perf_form(year, month, store_records):
+    """앱에 들어있는 소사장 실적보고 양식(실적_월)에 채웁니다."""
+    return fill_form_sosajang_perf(templates_data.get_template_bytes("소사장실적"),
+                                   year, month, store_records)
+
