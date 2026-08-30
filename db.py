@@ -137,6 +137,40 @@ def init_db():
         )
         """
     )
+    # 소사장은 '사람'이 아니라 '매장' 단위로 근태를 관리하기 때문에 별도 테이블을 씁니다.
+    #   open_code  : 소사장 근태 양식(출첵) 하루 2칸 중 왼쪽 = 출근보고
+    #   close_code : 오른쪽 = 퇴근보고
+    #   perf_code  : 소사장 실적보고 양식(실적_월) 하루 1칸
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS store_attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL DEFAULT '소사장',
+            store TEXT NOT NULL,
+            work_date TEXT NOT NULL,
+            open_code TEXT,
+            close_code TEXT,
+            perf_code TEXT,
+            memo TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(category, store, work_date)
+        )
+        """
+    )
+    # 카톡 AI 검토 결과 보관 (검토 → 확인/수정 → DB 반영 흐름)
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kakao_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            target_month TEXT NOT NULL,
+            result_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
 
     # 예전 버전(구조 변경 전) DB에는 category 컬럼이 없을 수 있어 마이그레이션
@@ -478,6 +512,158 @@ def get_all_attendance(start_date: str = None, end_date: str = None, category: s
         q += " AND u.department = ?"
         params.append(org_unit)
     q += " ORDER BY a.work_date DESC, u.category, u.department, u.name"
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ============================================================================
+# 소사장 매장 단위 근태 (출첵 / 실적_월)
+# ============================================================================
+
+# 소사장 근태 양식(출첵)에서 쓰는 코드
+STORE_CHULCHECK_CODES = ["o", "휴", "미", "개인", "휴가", "본사", "조기마감", "조기퇴근"]
+# 소사장 실적보고 양식(실적_월)에서 쓰는 코드
+STORE_PERF_CODES = ["O", "휴", "미", "휴가", "개인", "본사", "조기마감", "조기퇴근"]
+
+
+def upsert_store_attendance(store, work_date, open_code=None, close_code=None,
+                            perf_code=None, memo=None, category="소사장"):
+    """매장 단위 근태 저장 (같은 매장·같은 날짜면 덮어쓰기).
+    None으로 넘긴 항목은 기존 값을 그대로 둡니다(부분 수정 가능)."""
+    conn = get_conn()
+    now = datetime.now().isoformat()
+    row = conn.execute(
+        "SELECT * FROM store_attendance WHERE category=? AND store=? AND work_date=?",
+        (category, store, work_date),
+    ).fetchone()
+    if row:
+        conn.execute(
+            """UPDATE store_attendance
+               SET open_code=?, close_code=?, perf_code=?, memo=?, updated_at=?
+               WHERE id=?""",
+            (
+                open_code if open_code is not None else row["open_code"],
+                close_code if close_code is not None else row["close_code"],
+                perf_code if perf_code is not None else row["perf_code"],
+                memo if memo is not None else row["memo"],
+                now,
+                row["id"],
+            ),
+        )
+    else:
+        conn.execute(
+            """INSERT INTO store_attendance
+               (category, store, work_date, open_code, close_code, perf_code, memo, created_at, updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (category, store, work_date, open_code, close_code, perf_code, memo, now, now),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_store_attendance(start_date, end_date, category="소사장"):
+    """기간 내 매장 단위 근태 전체 조회"""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT store, work_date, open_code, close_code, perf_code, memo
+           FROM store_attendance
+           WHERE category=? AND work_date>=? AND work_date<=?
+           ORDER BY store, work_date""",
+        (category, start_date, end_date),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_store_attendance(store, work_date, category="소사장"):
+    conn = get_conn()
+    conn.execute(
+        "DELETE FROM store_attendance WHERE category=? AND store=? AND work_date=?",
+        (category, store, work_date),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_store_daily_entry_counts(start_date, end_date, category="소사장"):
+    """날짜별로 근태가 들어온 매장 수 (반영 현황 캘린더용)"""
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT work_date, COUNT(DISTINCT store) AS cnt
+           FROM store_attendance
+           WHERE category=? AND work_date>=? AND work_date<=?
+           GROUP BY work_date""",
+        (category, start_date, end_date),
+    ).fetchall()
+    conn.close()
+    return {r["work_date"]: r["cnt"] for r in rows}
+
+
+# ============================================================================
+# 카톡 AI 검토 결과
+# ============================================================================
+
+def save_kakao_review(category, target_month, result_json, status="pending"):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO kakao_reviews (category, target_month, result_json, status, created_at)
+           VALUES (?,?,?,?,?)""",
+        (category, target_month, result_json, status, datetime.now().isoformat()),
+    )
+    review_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return review_id
+
+
+def list_kakao_reviews(category=None, limit=20):
+    conn = get_conn()
+    q = "SELECT id, category, target_month, status, created_at FROM kakao_reviews"
+    params = []
+    if category:
+        q += " WHERE category = ?"
+        params.append(category)
+    q += " ORDER BY created_at DESC LIMIT ?"
+    params.append(limit)
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_kakao_review(review_id):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM kakao_reviews WHERE id = ?", (review_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def update_kakao_review(review_id, result_json=None, status=None):
+    conn = get_conn()
+    if result_json is not None:
+        conn.execute("UPDATE kakao_reviews SET result_json=? WHERE id=?", (result_json, review_id))
+    if status is not None:
+        conn.execute("UPDATE kakao_reviews SET status=? WHERE id=?", (status, review_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_kakao_review(review_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM kakao_reviews WHERE id = ?", (review_id,))
+    conn.commit()
+    conn.close()
+
+
+def find_user_by_name(name, category=None):
+    """이름으로 직원 찾기 (AI 검토 결과를 DB에 반영할 때 사용). 동명이인이면 여러 건 반환."""
+    conn = get_conn()
+    q = "SELECT id, name, category, department FROM users WHERE active=1 AND name=?"
+    params = [name]
+    if category:
+        q += " AND category=?"
+        params.append(category)
     rows = conn.execute(q, params).fetchall()
     conn.close()
     return [dict(r) for r in rows]
