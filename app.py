@@ -20,6 +20,22 @@ st.set_page_config(page_title="(주)대교통신 HR 플랫폼", page_icon="🗂�
 db.init_db()
 
 
+def _build_bulk_template():
+    """직원 일괄 등록용 빈 엑셀 양식 (예시 3줄 포함) 생성"""
+    sample = pd.DataFrame([
+        {"아이디": "D100001", "이름": "홍길동", "구분": "본사", "부서/매장": "관리팀",
+         "초기비밀번호": "changeme01", "권한": "employee"},
+        {"아이디": "D100002", "이름": "김철수", "구분": "직영", "부서/매장": "범계역직영점",
+         "초기비밀번호": "changeme02", "권한": "employee"},
+        {"아이디": "D100003", "이름": "이영희", "구분": "소사장", "부서/매장": "대교대리점 군포역점",
+         "초기비밀번호": "changeme03", "권한": "employee"},
+    ])
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        sample.to_excel(writer, index=False, sheet_name="직원목록")
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # 로그인 / 세션 관리
 # ---------------------------------------------------------------------------
@@ -266,6 +282,70 @@ def admin_view(user):
                     st.error(msg)
 
         st.divider()
+        with st.expander("엑셀로 직원 일괄 등록 (여러 명 한번에)"):
+            st.caption(
+                "70명을 한 명씩 등록하기 번거로우시면, 아래 양식에 맞춰 엑셀을 채워서 올리세요. "
+                "'구분'은 본사/직영/소사장 중 하나, '부서/매장'은 그 구분에 실제로 있는 이름과 정확히 같아야 해요."
+            )
+            st.download_button(
+                "빈 양식 다운로드 (예시 3줄 포함)",
+                data=_build_bulk_template(),
+                file_name="직원_일괄등록_양식.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="bulk_template_dl",
+            )
+
+            uploaded = st.file_uploader(
+                "작성한 엑셀 파일 업로드 (.xlsx)", type=["xlsx"], key="bulk_upload_file"
+            )
+            if uploaded is not None:
+                try:
+                    in_df = pd.read_excel(uploaded, dtype=str).fillna("")
+                except Exception as e:
+                    st.error(f"파일을 읽을 수 없습니다: {e}")
+                    in_df = None
+
+                if in_df is not None:
+                    required_cols = {"아이디", "이름", "구분", "부서/매장"}
+                    if not required_cols.issubset(set(in_df.columns)):
+                        st.error(f"필수 열이 빠졌습니다. 필요한 열: {', '.join(sorted(required_cols))}")
+                    else:
+                        st.dataframe(in_df, use_container_width=True, hide_index=True)
+                        if st.button("일괄 등록 실행", key="bulk_register_btn", use_container_width=True):
+                            success, failed = [], []
+                            for _, row in in_df.iterrows():
+                                uname = str(row.get("아이디", "")).strip()
+                                name = str(row.get("이름", "")).strip()
+                                category = str(row.get("구분", "")).strip()
+                                org_unit = str(row.get("부서/매장", "")).strip()
+                                pw = str(row.get("초기비밀번호", "")).strip() or "changeme123"
+                                role = str(row.get("권한", "")).strip()
+                                role = role if role in ("employee", "admin") else "employee"
+
+                                if not uname or not name:
+                                    failed.append((uname or "(빈값)", "아이디 또는 이름이 비어있음"))
+                                    continue
+                                if category not in db.CATEGORIES:
+                                    failed.append((uname, f"구분 '{category}'이 본사/직영/소사장 중 하나가 아님"))
+                                    continue
+                                if org_unit not in db.get_org_units(category):
+                                    failed.append((uname, f"'{category}'에 '{org_unit}' 부서/매장이 없음"))
+                                    continue
+
+                                ok, msg = db.create_user(uname, pw, name, category, org_unit, role)
+                                (success if ok else failed).append(uname if ok else (uname, msg))
+
+                            st.success(f"성공: {len(success)}건")
+                            if failed:
+                                st.error(f"실패: {len(failed)}건")
+                                st.dataframe(
+                                    pd.DataFrame(failed, columns=["아이디", "실패 사유"]),
+                                    use_container_width=True, hide_index=True,
+                                )
+                            if success:
+                                st.rerun()
+
+        st.divider()
         st.subheader("직원 목록")
         users = db.list_users()
         udf = pd.DataFrame(users)
@@ -349,6 +429,22 @@ def admin_view(user):
                     else:
                         db.deactivate_user(target["id"])
                         st.success(f"{target['name']} 계정이 비활성화되었습니다.")
+                        st.rerun()
+
+            with st.expander("비활성화된 계정 되살리기"):
+                inactive_users = [u for u in db.list_users(include_inactive=True) if u["active"] == 0]
+                if not inactive_users:
+                    st.caption("비활성화된 계정이 없습니다.")
+                else:
+                    revive_target = st.selectbox(
+                        "되살릴 직원",
+                        inactive_users,
+                        format_func=lambda u: f"{u['name']} ({u['username']}, {u['category']} · {u['department']})",
+                        key="revive_target_select",
+                    )
+                    if st.button("선택한 계정 되살리기", key="revive_btn", use_container_width=True):
+                        db.activate_user(revive_target["id"])
+                        st.success(f"{revive_target['name']} 계정이 다시 활성화되었습니다.")
                         st.rerun()
 
 
