@@ -28,6 +28,7 @@ ATTENDANCE_CODES = [
     "정상출근",
     "연차",
     "반차",
+    "휴가",
     "지각",
     "조퇴",
     "특근",
@@ -179,6 +180,22 @@ def init_db():
         conn.commit()
     except sqlite3.OperationalError:
         pass  # 이미 컬럼이 있으면 무시
+
+    # 예전에 '기타'로 저장된 기록은 원래 표현이 memo에 남아 있습니다.
+    # (예: 카톡에 "한송이 : 휴가"라고 올라왔는데 그때는 '휴가' 항목이 없어서 기타로 저장됨)
+    # 그 사이에 정식 항목으로 추가된 표현이면 제대로 된 코드로 올려줍니다.
+    try:
+        marks = ",".join("?" * len(ATTENDANCE_CODES))
+        cur.execute(
+            f"UPDATE attendance SET code = memo, memo = '' "
+            f"WHERE code = '기타' AND TRIM(memo) IN ({marks})",
+            [c for c in ATTENDANCE_CODES],
+        )
+        if cur.rowcount:
+            print(f"[db] '기타'로 저장돼 있던 {cur.rowcount}건을 정식 근태 항목으로 정리했습니다.")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
     # 최초 실행 시 관리자 계정이 하나도 없으면 기본 관리자 계정 생성
     cur.execute("SELECT COUNT(*) as cnt FROM users WHERE role = 'admin'")
