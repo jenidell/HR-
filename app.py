@@ -10,6 +10,7 @@
 
 import io
 import re
+from calendar import Calendar
 from datetime import date, timedelta
 
 import pandas as pd
@@ -487,6 +488,64 @@ def _decode_uploaded_text(uploaded_file):
     return raw_bytes.decode("utf-8", errors="ignore")
 
 
+def _kakao_calendar_view(category, year, month):
+    """선택한 구분(본사/직영/소사장)·연/월 기준, 날짜별로 카톡 근태가 이미 반영됐는지 한눈에 보여주는 달력.
+    ✅ 등록된 인원 전원 반영 / ⚠️ 일부만 반영 / ❌ 아무도 반영 안 됨 / 회색 = 아직 지나지 않은 날짜(판단 안 함)."""
+    month_start = date(year, month, 1)
+    month_end = date(year, 12, 31) if month == 12 else date(year, month + 1, 1) - timedelta(days=1)
+    today = date.today()
+
+    cat_employees = [e for e in db.list_users(include_inactive=False) if e["category"] == category]
+    total = len(cat_employees)
+    if total == 0:
+        st.caption(f"등록된 {category} 직원이 없어 반영 현황을 표시할 수 없어요.")
+        return
+
+    records = db.get_attendance_records_for_matrix(category, month_start.isoformat(), month_end.isoformat())
+    by_date = {}
+    for r in records:
+        by_date.setdefault(r["work_date"], set()).add(r["user_id"])
+
+    st.caption(
+        f"등록된 {category} 인원 {total}명 기준 — ✅ 전원 반영 / ⚠️ 일부만 반영 / ❌ 미반영 "
+        f"/ 빈 칸은 아직 지나지 않은 날짜예요."
+    )
+
+    # st.columns는 모바일 좁은 화면에서 자동으로 세로로 쌓여버려서 달력이 깨짐 ->
+    # HTML table 하나로 통째로 그려서 항상 7칸 가로 배치가 유지되게 함
+    weekday_kr = ["월", "화", "수", "목", "금", "토", "일"]
+    header_cells = "".join(
+        f"<th style='padding:2px 0;font-size:11px;color:#888;font-weight:normal'>{wd}</th>" for wd in weekday_kr
+    )
+    rows_html = [f"<tr>{header_cells}</tr>"]
+
+    for week in Calendar(firstweekday=0).monthdatescalendar(year, month):
+        cells = []
+        for day in week:
+            if day.month != month:
+                cells.append("<td></td>")
+            elif day > today:
+                cells.append(
+                    "<td style='text-align:center;border:1px solid #eee;border-radius:6px;"
+                    "padding:3px 0;color:#ccc'>"
+                    f"<div style='font-size:11px'>{day.day}</div><div style='font-size:13px'>&nbsp;</div></td>"
+                )
+            else:
+                cnt = len(by_date.get(day.isoformat(), set()))
+                icon = "❌" if cnt == 0 else ("⚠️" if cnt < total else "✅")
+                cells.append(
+                    "<td style='text-align:center;border:1px solid #eee;border-radius:6px;padding:3px 0'>"
+                    f"<div style='font-size:11px'>{day.day}</div><div style='font-size:13px'>{icon}</div></td>"
+                )
+        rows_html.append(f"<tr>{''.join(cells)}</tr>")
+
+    table_html = (
+        "<table style='width:100%;border-collapse:separate;border-spacing:2px;table-layout:fixed'>"
+        + "".join(rows_html) + "</table>"
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
 def kakao_import_view(user):
     st.subheader("카톡 근태 가져오기")
     st.caption(
@@ -506,6 +565,9 @@ def kakao_import_view(user):
             "가져올 월", min_value=1, max_value=12, value=date.today().month, step=1, key="kakao_month"
         )
     st.caption(f"→ {int(target_year)}년 {int(target_month)}월 근태만 걸러서 가져와요. 나머지 달 내용은 자동으로 무시됩니다.")
+
+    with st.expander(f"📅 {category} {int(target_year)}년 {int(target_month)}월 반영 현황 캘린더", expanded=False):
+        _kakao_calendar_view(category, int(target_year), int(target_month))
 
     uploaded = st.file_uploader(
         "카톡 대화 파일 업로드 (.txt, 카카오톡 '대화 내보내기')", type=["txt"], key="kakao_file"
