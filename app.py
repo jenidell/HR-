@@ -354,6 +354,18 @@ def admin_view(user):
             udf_display.columns = ["아이디", "이름", "구분", "부서/매장", "권한"]
             st.dataframe(udf_display, use_container_width=True, hide_index=True)
 
+            with st.expander("복사하기 편한 텍스트로 보기"):
+                st.caption("이 표는 그림처럼 그려져서 Ctrl+C가 잘 안 먹혀요. 아래 상자 안 글자는 평범하게 드래그해서 복사하시면 돼요.")
+                lines = [
+                    f"{u['username']}\t{u['name']}\t{u['category']}\t{u['department']}\t{u['role']}"
+                    for u in users
+                ]
+                st.text_area(
+                    "아이디 / 이름 / 구분 / 부서·매장 / 권한",
+                    value="아이디\t이름\t구분\t부서/매장\t권한\n" + "\n".join(lines),
+                    height=200, key="user_list_copy_text",
+                )
+
             with st.expander("직원 정보 수정 / 계정 삭제"):
                 edit_target = st.selectbox(
                     "대상 직원",
