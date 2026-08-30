@@ -236,6 +236,34 @@ def deactivate_user(user_id: int):
     conn.close()
 
 
+def update_user(user_id: int, name: str, category: str, department: str, role: str, new_password: str = None):
+    """계정 정보 수정 (이름/구분/부서·매장/권한). new_password를 주면 비밀번호도 함께 변경"""
+    conn = get_conn()
+    if new_password:
+        salt = os.urandom(16).hex()
+        pw_hash = _hash_password(new_password, salt)
+        conn.execute(
+            "UPDATE users SET name = ?, category = ?, department = ?, role = ?, password_hash = ?, salt = ? WHERE id = ?",
+            (name, category, department, role, pw_hash, salt, user_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE users SET name = ?, category = ?, department = ?, role = ? WHERE id = ?",
+            (name, category, department, role, user_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def delete_user(user_id: int):
+    """계정을 완전히 삭제 (해당 계정의 근태 입력 내역도 함께 삭제됨). 잘못 만든 계정 정리용."""
+    conn = get_conn()
+    conn.execute("DELETE FROM attendance WHERE user_id = ?", (user_id,))
+    conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
 def delete_attendance(user_id: int, work_date: str):
     """특정 직원의 특정 날짜 근태 입력을 삭제 (잘못 입력한 경우 등)"""
     conn = get_conn()
