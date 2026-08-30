@@ -10,6 +10,7 @@
 
 import io
 import os
+import re
 from datetime import date, timedelta
 
 import pandas as pd
@@ -338,6 +339,281 @@ def announcements_view(user):
 
 
 # ---------------------------------------------------------------------------
+# 카톡 근태 가져오기: 본사/직영/소사장 카톡방에 매일 올라오는 근태 메시지를
+# 그대로 붙여넣으면 근태표 형식으로 파싱 (직원들의 카톡 습관은 그대로 유지)
+# ---------------------------------------------------------------------------
+
+_KAKAO_STATUS_MAP = {
+    "출근": "정상출근",
+    "연차": "연차",
+    "반차": "반차",
+    "오전반차": "반차",
+    "오후반차": "반차",
+    "지각": "지각",
+    "조퇴": "조퇴",
+    "특근": "특근",
+    "당직": "당직",
+    "교육": "교육",
+    "경조": "경조",
+    "예비군": "예비군",
+    "무급": "무급",
+    "개인용무": "개인용무",
+    "휴무": "휴무",
+}
+
+_DATE_DIVIDER_RE = re.compile(r"(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일")
+
+
+def parse_headquarters_chat(text, fallback_date):
+    """본사 카톡 형식: "8월 28일 (금) 전산팀 출근현황" 헤더 다음 "이름 : 상태" 줄들"""
+    header_re = re.compile(r"(\d{1,2})월\s*(\d{1,2})일.*?(?:출근현황|근태)")
+    name_status_re = re.compile(r"^\s*([가-힣A-Za-z0-9]+)\s*[:：]\s*(.+?)\s*$")
+
+    results = []
+    current_date = fallback_date
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        hm = header_re.search(line)
+        if hm:
+            month, day = int(hm.group(1)), int(hm.group(2))
+            try:
+                current_date = date(fallback_date.year, month, day)
+            except ValueError:
+                pass
+            continue
+        nm = name_status_re.match(line)
+        if nm:
+            name, status_text = nm.group(1), nm.group(2).strip()
+            code = _KAKAO_STATUS_MAP.get(status_text)
+            results.append({
+                "raw": line, "name": name, "store": None,
+                "work_date": current_date, "code": code or "기타",
+                "memo": "" if code else status_text,
+            })
+    return results
+
+
+def parse_jikyeong_chat(text, fallback_date):
+    """직영 카톡 형식: "매장명 출근보고" / "10시 이름1 이름2" / "휴무 이름A 이름B" / "이상입니다" """
+    report_start_re = re.compile(r"^(.+?)\s*출근보고\s*$")
+    time_line_re = re.compile(r"^\d{1,2}시\s*(.+)$")
+    end_re = re.compile(r"^이상입니다\s*$")
+
+    lines = [l.strip() for l in text.splitlines()]
+    results = []
+    current_date = fallback_date
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line:
+            i += 1
+            continue
+        rm = report_start_re.match(line)
+        if rm:
+            store = rm.group(1).strip()
+            block = {}
+            i += 1
+            if i < len(lines):
+                tm = time_line_re.match(lines[i])
+                if tm:
+                    for nm in tm.group(1).split():
+                        block[nm] = "정상출근"
+                    i += 1
+            while i < len(lines) and not end_re.match(lines[i]) and not report_start_re.match(lines[i]):
+                parts = lines[i].split()
+                if parts and parts[0] in _KAKAO_STATUS_MAP:
+                    code = _KAKAO_STATUS_MAP[parts[0]]
+                    for nm in parts[1:]:
+                        block[nm] = code
+                i += 1
+            if i < len(lines) and end_re.match(lines[i]):
+                i += 1
+            for name, code in block.items():
+                results.append({
+                    "raw": f"{store} 출근보고", "name": name, "store": store,
+                    "work_date": current_date, "code": code, "memo": "",
+                })
+            continue
+        dm = _DATE_DIVIDER_RE.search(line)
+        if dm:
+            try:
+                current_date = date(int(dm.group(1)), int(dm.group(2)), int(dm.group(3)))
+            except ValueError:
+                pass
+        i += 1
+    return results
+
+
+def parse_sosajang_chat(text, fallback_date):
+    """소사장 카톡 형식: "매장명 출근입니다" / "매장명 휴무입니다 매장은 CLOSE 입니다" 등 한 줄 자기 보고.
+    "금일 휴무입니다"처럼 메시지에 매장명이 없으면, 바로 위 발신자 줄("대교_매장명 이름소사장")에서
+    매장명을 찾아 이어서 사용."""
+    msg_re = re.compile(r"^(.+?)\s*(출근|휴무|퇴근)입니다")
+    short_stores = [s.replace("대교대리점 ", "") for s in db.SOSAJANG_STORES]
+    no_store_words = {"금일", "오늘", "익일", "내일"}
+
+    results = []
+    current_date = fallback_date
+    current_store = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+
+        store_matches = [s for s in short_stores if s in line]
+        found_store = max(store_matches, key=len) if store_matches else None
+
+        mm = msg_re.match(line)
+        if mm:
+            body_store = mm.group(1).strip()
+            if found_store:
+                store = found_store
+            elif body_store in no_store_words:
+                store = current_store or body_store
+            else:
+                store = body_store
+            status = mm.group(2)
+            code = "휴무" if status == "휴무" else "정상출근"
+            memo = "CLOSE" if "CLOSE" in line.upper() else ""
+            results.append({
+                "raw": line, "name": None, "store": store,
+                "work_date": current_date, "code": code, "memo": memo,
+            })
+            if found_store:
+                current_store = found_store
+            continue
+
+        dm = _DATE_DIVIDER_RE.search(line)
+        if dm:
+            try:
+                current_date = date(int(dm.group(1)), int(dm.group(2)), int(dm.group(3)))
+            except ValueError:
+                pass
+            continue
+
+        if found_store:
+            current_store = found_store
+    return results
+
+
+_KAKAO_EXAMPLES = {
+    "본사": "8월 28일 (금) 전산팀 출근현황\n최요안나 : 출근\n동희원 : 연차\n김선영 : 휴무",
+    "직영": "상동점 출근보고\n10시 유경학\n연차 김찬양\n이상입니다",
+    "소사장": "군포역점 출근입니다\n인덕원점 휴무입니다 매장은 CLOSE 입니다",
+}
+
+
+def kakao_import_view(user):
+    st.subheader("카톡 근태 가져오기")
+    st.caption(
+        "카톡방(본사/직영/소사장)에 매일 올라오는 근태 메시지를 그대로 붙여넣으면 근태표 형식으로 정리해서 "
+        "미리 보여드려요. 확인하고 저장하면 '근태표 양식 엑셀 다운로드'에도 바로 반영돼요. "
+        "직원들은 지금처럼 카톡에만 올리면 되고, 따로 앱에 입력할 필요 없어요."
+    )
+
+    category = st.selectbox("구분", db.CATEGORIES, key="kakao_category")
+    fallback_date = st.date_input(
+        "대화 내용에 날짜가 안 나올 때 쓸 기본 날짜", value=date.today(), key="kakao_fallback_date"
+    )
+    chat_text = st.text_area(
+        "카톡 대화 내용 붙여넣기", height=220,
+        placeholder=f"예시:\n{_KAKAO_EXAMPLES[category]}", key="kakao_text",
+    )
+
+    if st.button("미리보기", key="kakao_preview_btn", use_container_width=True):
+        if not chat_text.strip():
+            st.warning("붙여넣은 내용이 없습니다.")
+            st.session_state.pop("kakao_parsed", None)
+        else:
+            if category == "본사":
+                parsed = parse_headquarters_chat(chat_text, fallback_date)
+            elif category == "직영":
+                parsed = parse_jikyeong_chat(chat_text, fallback_date)
+            else:
+                parsed = parse_sosajang_chat(chat_text, fallback_date)
+            st.session_state["kakao_parsed"] = parsed
+            st.session_state["kakao_parsed_category"] = category
+            if not parsed:
+                st.warning("인식된 근태 내용이 없어요. 형식이 다르면 캡처해서 알려주시면 맞춰드릴게요.")
+
+    parsed = st.session_state.get("kakao_parsed")
+    parsed_category = st.session_state.get("kakao_parsed_category")
+    if parsed and parsed_category == category:
+        st.divider()
+        st.markdown(f"**미리보기 — {len(parsed)}건 인식됨. 확인하고 틀린 부분은 고친 뒤 저장하세요.**")
+
+        cat_employees = [e for e in db.list_users(include_inactive=False) if e["category"] == category]
+        emp_names = [e["name"] for e in cat_employees]
+
+        with st.form("kakao_save_form"):
+            row_keys = []
+            for idx, row in enumerate(parsed):
+                with st.container(border=True):
+                    st.caption(f"원문: {row['raw']}")
+                    c1, c2, c3, c4, c5 = st.columns([1.3, 1.6, 1.3, 1.6, 0.8])
+                    with c1:
+                        st.date_input(
+                            "날짜", value=row["work_date"], key=f"kk_date_{idx}", label_visibility="collapsed"
+                        )
+                    with c2:
+                        if category == "소사장" and row.get("store"):
+                            match = next(
+                                (e for e in cat_employees if row["store"] in e["department"]), None
+                            )
+                        else:
+                            match = next((e for e in cat_employees if e["name"] == row.get("name")), None)
+                        options = ["(직접 선택)"] + emp_names
+                        default_idx = options.index(match["name"]) if match and match["name"] in options else 0
+                        st.selectbox(
+                            "직원", options, index=default_idx, key=f"kk_emp_{idx}", label_visibility="collapsed"
+                        )
+                    with c3:
+                        code_default = row["code"] if row["code"] in db.ATTENDANCE_CODES else "기타"
+                        st.selectbox(
+                            "근태코드", db.ATTENDANCE_CODES, index=db.ATTENDANCE_CODES.index(code_default),
+                            key=f"kk_code_{idx}", label_visibility="collapsed",
+                        )
+                    with c4:
+                        st.text_input(
+                            "메모", value=row.get("memo", ""), key=f"kk_memo_{idx}", label_visibility="collapsed"
+                        )
+                    with c5:
+                        st.checkbox("반영", value=True, key=f"kk_include_{idx}")
+                    row_keys.append(idx)
+
+            submitted = st.form_submit_button("선택한 내용 저장", use_container_width=True)
+
+        if submitted:
+            saved = 0
+            unmatched = 0
+            for idx in row_keys:
+                if not st.session_state.get(f"kk_include_{idx}", True):
+                    continue
+                chosen_name = st.session_state.get(f"kk_emp_{idx}")
+                if chosen_name == "(직접 선택)" or not chosen_name:
+                    unmatched += 1
+                    continue
+                emp = next((e for e in cat_employees if e["name"] == chosen_name), None)
+                if not emp:
+                    unmatched += 1
+                    continue
+                wd = st.session_state.get(f"kk_date_{idx}")
+                code = st.session_state.get(f"kk_code_{idx}")
+                memo = st.session_state.get(f"kk_memo_{idx}", "")
+                db.upsert_attendance(emp["id"], wd.isoformat(), code, memo)
+                saved += 1
+            if saved:
+                st.success(f"{saved}건 저장되었습니다.")
+            if unmatched:
+                st.warning(f"직원이 매칭되지 않아 저장하지 않은 항목이 {unmatched}건 있어요. '직원' 항목에서 직접 선택 후 다시 저장해주세요.")
+            else:
+                del st.session_state["kakao_parsed"]
+                st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # 원본 근태 파일 형식(본사근태 / 직영근태 / 소사장근태) 그대로 엑셀 다운로드
 # ---------------------------------------------------------------------------
 
@@ -503,7 +779,10 @@ def build_category_format_excel(start_date, end_date):
 # 관리자용: 전체 현황 + 계정 관리
 # ---------------------------------------------------------------------------
 def admin_view(user):
-    tab1, tab2 = st.tabs(["전체 근태 현황", "직원 계정 관리"])
+    tab1, tab_kakao, tab2 = st.tabs(["전체 근태 현황", "카톡 근태 가져오기", "직원 계정 관리"])
+
+    with tab_kakao:
+        kakao_import_view(user)
 
     with tab1:
         st.subheader("근태 미입력 매장/부서 확인")
