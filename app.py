@@ -16,7 +16,7 @@ import streamlit as st
 
 import db
 
-st.set_page_config(page_title="대교통신 HR 플랫폼", page_icon="🗂️", layout="wide")
+st.set_page_config(page_title="(주)대교통신 HR 플랫폼", page_icon="🗂️", layout="wide")
 db.init_db()
 
 
@@ -24,7 +24,7 @@ db.init_db()
 # 로그인 / 세션 관리
 # ---------------------------------------------------------------------------
 def login_view():
-    st.title("🗂️ 대교통신 HR 플랫폼")
+    st.title("🗂️ (주)대교통신 HR 플랫폼")
     st.caption("근태입력 셀프서비스 (Phase 1)")
 
     with st.form("login_form"):
@@ -94,6 +94,60 @@ def employee_view(user):
         st.dataframe(df, use_container_width=True, hide_index=True)
     else:
         st.info("해당 기간에 입력된 근태 내역이 없습니다.")
+
+
+# ---------------------------------------------------------------------------
+# 팀 일괄입력: 팀 담당자가 하루치 팀 전체 근태를 한번에 입력
+# ---------------------------------------------------------------------------
+def bulk_entry_view(user):
+    st.header("팀 일괄입력")
+    st.caption("팀 담당자가 하루 단위로 팀 전체 근태를 한번에 입력할 수 있어요.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        work_date = st.date_input("날짜", value=date.today(), key="bulk_date")
+    with c2:
+        dept_options = db.DEPARTMENTS
+        default_idx = dept_options.index(user["department"]) if user["department"] in dept_options else 0
+        dept = st.selectbox("부서 선택", dept_options, index=default_idx, key="bulk_dept")
+
+    members = db.list_users_by_department(dept)
+    if not members:
+        st.info(f"'{dept}'에 소속된 직원이 없습니다.")
+        return
+
+    existing = db.get_attendance_for_date(work_date.isoformat(), dept)
+
+    with st.form("bulk_attendance_form"):
+        entries = {}
+        for m in members:
+            prev = existing.get(m["id"], {})
+            prev_code = prev.get("code", "정상출근")
+            prev_memo = prev.get("memo", "")
+            code_idx = db.ATTENDANCE_CODES.index(prev_code) if prev_code in db.ATTENDANCE_CODES else 0
+
+            col_name, col_code, col_memo = st.columns([2, 2, 3])
+            with col_name:
+                st.markdown(f"**{m['name']}**")
+            with col_code:
+                code = st.selectbox(
+                    "근태 코드", db.ATTENDANCE_CODES, index=code_idx,
+                    key=f"bulk_code_{m['id']}", label_visibility="collapsed",
+                )
+            with col_memo:
+                memo = st.text_input(
+                    "메모", value=prev_memo, key=f"bulk_memo_{m['id']}",
+                    label_visibility="collapsed", placeholder="메모 (선택)",
+                )
+            entries[m["id"]] = (code, memo)
+
+        submitted = st.form_submit_button(f"{dept} 전체 저장 ({work_date.isoformat()})", use_container_width=True)
+
+    if submitted:
+        for user_id, (code, memo) in entries.items():
+            db.upsert_attendance(user_id, work_date.isoformat(), code, memo)
+        st.success(f"{work_date.isoformat()} 기준 {dept} {len(entries)}명 근태가 저장되었습니다.")
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -196,16 +250,22 @@ def main():
     user = st.session_state["user"]
     logout_button()
 
-    st.title("🗂️ 대교통신 HR 플랫폼")
+    st.title("🗂️ (주)대교통신 HR 플랫폼")
 
     if user["role"] == "admin":
-        tab_emp, tab_admin = st.tabs(["내 근태입력", "관리자"])
+        tab_emp, tab_bulk, tab_admin = st.tabs(["내 근태입력", "팀 일괄입력", "관리자"])
         with tab_emp:
             employee_view(user)
+        with tab_bulk:
+            bulk_entry_view(user)
         with tab_admin:
             admin_view(user)
     else:
-        employee_view(user)
+        tab_emp, tab_bulk = st.tabs(["내 근태입력", "팀 일괄입력"])
+        with tab_emp:
+            employee_view(user)
+        with tab_bulk:
+            bulk_entry_view(user)
 
 
 if __name__ == "__main__":
