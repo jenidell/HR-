@@ -16,8 +16,11 @@ from datetime import date, timedelta
 import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
+from streamlit_sortables import sort_items
 
 import db
+import ai_review
+import excel_export
 
 st.set_page_config(page_title="(주)대교통신 HR 플랫폼", page_icon="🗂️", layout="wide")
 db.init_db()
@@ -42,13 +45,16 @@ def _build_bulk_template():
 # 탭 순서 (관리자가 ▲▼ 버튼으로 자유롭게 바꿀 수 있도록 DB 설정에 저장)
 # ---------------------------------------------------------------------------
 TAB_LABELS = {
+    "ai": "카톡 AI 검토",
+    "export": "엑셀 내보내기",
     "bulk": "근태일괄입력",
     "emp": "근태개별입력",
     "status": "전체 근태현황",
     "kakao": "카톡 근태 가져오기",
+    "calendar": "반영 현황 캘린더",
     "admin": "직원 계정관리",
 }
-DEFAULT_TAB_ORDER = ["bulk", "emp", "status", "kakao", "admin"]
+DEFAULT_TAB_ORDER = ["ai", "calendar", "bulk", "emp", "status", "export", "kakao", "admin"]
 _TAB_ORDER_SETTING_KEY = "admin_tab_order"
 
 
@@ -66,21 +72,19 @@ def _save_tab_order(order):
 
 
 def tab_order_settings_view():
-    st.caption("▲▼ 버튼을 누르면 바로 저장되고, 탭 순서가 그 자리에서 바뀌어요.")
+    st.caption(
+        "아래 목록을 손가락으로 눌러서 위아래로 끌어놓으면(드래그) 순서가 바로 저장되고, "
+        "탭 순서도 그대로 바뀌어요. (Streamlit 특성상 화면 위쪽 탭 글자 자체를 직접 끌 수는 없어서, "
+        "이 목록을 대신 드래그하는 방식이에요.)"
+    )
     order = _get_tab_order()
-    for i, key in enumerate(order):
-        c1, c2, c3 = st.columns([5, 1, 1])
-        c1.markdown(f"{i + 1}. **{TAB_LABELS[key]}**")
-        if c2.button("▲", key=f"tab_up_{key}", disabled=(i == 0), use_container_width=True):
-            new_order = order[:]
-            new_order[i - 1], new_order[i] = new_order[i], new_order[i - 1]
-            _save_tab_order(new_order)
-            st.rerun()
-        if c3.button("▼", key=f"tab_down_{key}", disabled=(i == len(order) - 1), use_container_width=True):
-            new_order = order[:]
-            new_order[i + 1], new_order[i] = new_order[i], new_order[i + 1]
-            _save_tab_order(new_order)
-            st.rerun()
+    current_labels = [TAB_LABELS[k] for k in order]
+    new_labels = sort_items(current_labels, direction="vertical", key="tab_order_sortable")
+    if new_labels != current_labels:
+        label_to_key = {v: k for k, v in TAB_LABELS.items()}
+        new_order = [label_to_key[l] for l in new_labels]
+        _save_tab_order(new_order)
+        st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -540,19 +544,30 @@ def _kakao_calendar_view(category, year, month):
     month_end = date(year, 12, 31) if month == 12 else date(year, month + 1, 1) - timedelta(days=1)
     today = date.today()
 
-    cat_employees = [e for e in db.list_users(include_inactive=False) if e["category"] == category]
-    total = len(cat_employees)
-    if total == 0:
-        st.caption(f"등록된 {category} 직원이 없어 반영 현황을 표시할 수 없어요.")
-        return
-
-    records = db.get_attendance_records_for_matrix(category, month_start.isoformat(), month_end.isoformat())
-    by_date = {}
-    for r in records:
-        by_date.setdefault(r["work_date"], set()).add(r["user_id"])
+    if category == "소사장":
+        # 소사장은 '사람'이 아니라 '매장' 단위로 근태를 관리하므로 매장 기준으로 센다
+        cat_employees = [{"id": s, "name": s} for s in db.SOSAJANG_STORES]
+        total = len(cat_employees)
+        by_date = {}
+        for r in db.get_store_attendance(month_start.isoformat(), month_end.isoformat()):
+            by_date.setdefault(r["work_date"], set()).add(r["store"])
+        unit_label = f"매장 {total}곳"
+    else:
+        cat_employees = [e for e in db.list_users(include_inactive=False) if e["category"] == category]
+        total = len(cat_employees)
+        if total == 0:
+            st.caption(f"등록된 {category} 직원이 없어 반영 현황을 표시할 수 없어요.")
+            return
+        records = db.get_attendance_records_for_matrix(
+            category, month_start.isoformat(), month_end.isoformat()
+        )
+        by_date = {}
+        for r in records:
+            by_date.setdefault(r["work_date"], set()).add(r["user_id"])
+        unit_label = f"인원 {total}명"
 
     st.caption(
-        f"등록된 {category} 인원 {total}명 기준 — ✅ 전원 반영 / ⚠️ 일부만 반영 / ❌ 미반영 "
+        f"등록된 {category} {unit_label} 기준 — ✅ 전원 반영 / ⚠️ 일부만 반영 / ❌ 미반영 "
         f"/ 빈 칸은 아직 지나지 않은 날짜예요."
     )
 
@@ -604,12 +619,35 @@ def _kakao_calendar_view(category, year, month):
             missing_lines.append(f"**{d.month}/{d.day}({weekday_kr2[d.weekday()]})** — {missing_names}")
         d += timedelta(days=1)
 
-    with st.expander(f"❌⚠️ 날짜별로 아직 안 올라온 사람 보기 ({len(missing_lines)}일)"):
-        if not missing_lines:
-            st.caption("이번 달은 지난 날짜 전부 등록된 인원 전원이 반영됐어요!")
-        else:
-            for line in missing_lines:
-                st.markdown(line)
+    # 예전엔 펼침 메뉴 안에 숨겨뒀는데, "캘린더 안에 이름이 바로 보였으면 좋겠다"는 요청으로
+    # 클릭 없이 항상 보이게 바꿈
+    who = "매장" if category == "소사장" else "사람"
+    st.markdown(f"**❌⚠️ 날짜별로 아직 안 올라온 {who} ({len(missing_lines)}일)**")
+    if not missing_lines:
+        st.caption(f"이번 달은 지난 날짜 전부 등록된 {who} 전체가 반영됐어요!")
+    else:
+        for line in missing_lines:
+            st.markdown(line)
+
+
+def kakao_calendar_view(user):
+    st.subheader("반영 현황 캘린더")
+    st.caption(
+        "구분·연/월을 고르면 이번 달에 어느 날짜는 카톡 근태를 이미 가져왔고, 어느 날짜는 아직인지 "
+        "달력과 명단으로 바로 보여줘요."
+    )
+    category = st.selectbox("구분", db.CATEGORIES, key="cal_category")
+    c1, c2 = st.columns(2)
+    with c1:
+        target_year = st.number_input(
+            "연도", min_value=2020, max_value=2100, value=date.today().year, step=1, key="cal_year"
+        )
+    with c2:
+        target_month = st.number_input(
+            "월", min_value=1, max_value=12, value=date.today().month, step=1, key="cal_month"
+        )
+    st.divider()
+    _kakao_calendar_view(category, int(target_year), int(target_month))
 
 
 def kakao_import_view(user):
@@ -619,6 +657,7 @@ def kakao_import_view(user):
         "달(월)의 근태만 걸러서 정리해드려요. 확인하고 저장하면 '근태표 양식 엑셀 다운로드'에도 바로 반영돼요. "
         "직원들은 지금처럼 카톡에만 올리면 되고, 따로 앱에 입력할 필요 없어요."
     )
+    st.caption("💡 이번 달에 어느 날짜를 이미 가져왔는지는 '반영 현황 캘린더' 탭에서 확인할 수 있어요.")
 
     category = st.selectbox("구분", db.CATEGORIES, key="kakao_category")
     c1, c2 = st.columns(2)
@@ -631,9 +670,6 @@ def kakao_import_view(user):
             "가져올 월", min_value=1, max_value=12, value=date.today().month, step=1, key="kakao_month"
         )
     st.caption(f"→ {int(target_year)}년 {int(target_month)}월 근태만 걸러서 가져와요. 나머지 달 내용은 자동으로 무시됩니다.")
-
-    with st.expander(f"📅 {category} {int(target_year)}년 {int(target_month)}월 반영 현황 캘린더", expanded=False):
-        _kakao_calendar_view(category, int(target_year), int(target_month))
 
     uploaded = st.file_uploader(
         "카톡 대화 파일 업로드 (.txt, 카카오톡 '대화 내보내기')", type=["txt"], key="kakao_file"
@@ -1225,6 +1261,410 @@ def admin_accounts_view(user):
 # ---------------------------------------------------------------------------
 # 메인
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 카톡 AI 검토 — 카톡 대화를 AI가 읽고, 오타·누락·애매한 건을 골라내 알려줌
+# ---------------------------------------------------------------------------
+def _roster_for(category):
+    """AI에게 알려줄 명단 (본사·직영은 직원 이름, 소사장은 매장명)"""
+    if category == "소사장":
+        return list(db.SOSAJANG_STORES)
+    return [
+        f"{e['name']} ({e['department']})"
+        for e in db.list_users(include_inactive=False)
+        if e["category"] == category
+    ]
+
+
+_ISSUE_ICON = {
+    "오타": "✏️", "누락": "🕳️", "중복": "♻️", "확인필요": "❓", "규정위반": "🚨",
+}
+
+
+def ai_review_view(user):
+    st.subheader("카톡 AI 검토")
+    st.caption(
+        "카톡 대화를 그대로 올리면 AI가 읽고 ①어떤 근태가 올라왔는지 정리하고 "
+        "②오타·안 올라온 사람·중복·애매해서 물어봐야 하는 건을 골라서 알려줘요. "
+        "내용을 확인하고 고친 다음 저장하면 근태 현황과 캘린더에 바로 반영돼요."
+    )
+
+    if not ai_review.is_configured():
+        st.warning(
+            "AI 검토를 쓰려면 Anthropic API 키가 필요해요. (앱 코드나 GitHub에는 절대 안 들어갑니다)\n\n"
+            "1. console.anthropic.com 에서 API 키를 발급받으세요 (사용한 만큼 과금돼요)\n"
+            "2. Streamlit Cloud에서 이 앱 → 우측 상단 ⋮ → **Settings → Secrets** 에 아래 한 줄을 붙여넣고 저장\n"
+            "```\nANTHROPIC_API_KEY = \"sk-ant-여기에-발급받은-키\"\n```\n"
+            "3. 앱이 자동으로 재시작되면 이 화면에서 바로 쓸 수 있어요."
+        )
+        st.divider()
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        category = st.selectbox("구분", db.CATEGORIES, key="air_category")
+    with c2:
+        year = st.number_input("연도", 2020, 2100, date.today().year, 1, key="air_year")
+    with c3:
+        month = st.number_input("월", 1, 12, date.today().month, 1, key="air_month")
+
+    up = st.file_uploader("카톡 대화 내보내기 파일 (.txt)", type=["txt"], key="air_file")
+    text = st.text_area(
+        "또는 대화 내용을 여기에 붙여넣기",
+        height=160,
+        key="air_text",
+        placeholder="카톡 대화를 길게 눌러 복사한 뒤 붙여넣어도 돼요.",
+    )
+    if up is not None:
+        text = _decode_uploaded_text(up)
+        st.caption(f"📎 {up.name} — {len(text):,}자를 읽었어요.")
+
+    model = db.get_setting("ai_model", ai_review.DEFAULT_MODEL)
+
+    if st.button("🔍 AI 검토 시작", type="primary", disabled=not (text or "").strip()):
+        roster = _roster_for(category)
+        try:
+            box = st.empty()
+
+            def _progress(i, n):
+                box.info(f"검토 중… ({i}/{n} 조각)" if n > 1 else "검토 중…")
+
+            with st.spinner("AI가 카톡 내용을 읽고 있어요…"):
+                result = ai_review.review_kakao(
+                    category, text, roster, int(year), int(month),
+                    model=model, progress=_progress,
+                )
+            box.empty()
+            rid = db.save_kakao_review(
+                category, f"{int(year):04d}-{int(month):02d}", ai_review.to_json(result)
+            )
+            st.session_state["air_result"] = result
+            st.session_state["air_review_id"] = rid
+        except Exception as e:
+            st.error(f"검토 중 문제가 생겼어요.\n\n{e}")
+
+    result = st.session_state.get("air_result")
+    if not result:
+        st.info("아직 검토한 내용이 없어요. 카톡 대화를 올리고 위 버튼을 눌러주세요.")
+        _recent_reviews_view()
+        return
+
+    st.divider()
+    # 지난 검토를 불러온 경우 위쪽 선택칸과 다를 수 있으므로, 결과 자체에 적힌 구분·월을 따른다
+    res_category = result.get("category") or category
+    res_year = int(result.get("year") or year)
+    res_month = int(result.get("month") or month)
+    st.markdown(f"#### 📄 {res_category} · {res_year}년 {res_month}월 검토 결과")
+    if result.get("summary"):
+        st.markdown(f"**📌 검토 요약**\n\n{result['summary']}")
+
+    issues = result.get("issues") or []
+    st.markdown(f"### ⚠️ 확인이 필요한 것 ({len(issues)}건)")
+    if not issues:
+        st.success("이상한 점은 발견되지 않았어요.")
+    else:
+        for kind in ["확인필요", "오타", "누락", "중복", "규정위반"]:
+            group = [i for i in issues if i.get("kind") == kind]
+            if not group:
+                continue
+            with st.expander(f"{_ISSUE_ICON.get(kind,'•')} {kind} ({len(group)}건)", expanded=(kind == "확인필요")):
+                for it in group:
+                    head = " ".join(x for x in [it.get("date", ""), it.get("target", "")] if x)
+                    st.markdown(f"- **{head}** {it.get('detail','')}")
+                    if it.get("suggestion"):
+                        st.caption(f"　→ {it['suggestion']}")
+
+    records = result.get("records") or []
+    st.markdown(f"### 📋 읽어낸 근태 내용 ({len(records)}건)")
+    st.caption(
+        "표를 직접 고칠 수 있어요. 잘못된 줄은 맨 왼쪽 칸을 체크 해제하면 저장에서 빠져요. "
+        "다 고치셨으면 아래 저장 버튼을 눌러주세요."
+    )
+    if not records:
+        st.info("카톡에서 확인된 근태 기록이 없어요.")
+        return
+
+    is_sosajang = (res_category == "소사장")
+    rows = []
+    for r in records:
+        rows.append({
+            "저장": (r.get("confidence") != "low"),
+            "날짜": r.get("date", ""),
+            ("매장" if is_sosajang else "이름"): r.get("target", ""),
+            ("출근보고" if is_sosajang else "근태"): r.get("code", ""),
+            **({"퇴근보고": r.get("close_code", "")} if is_sosajang else {}),
+            "메모": r.get("memo", ""),
+            "확신도": r.get("confidence", ""),
+            "근거": r.get("source", ""),
+        })
+    edited = st.data_editor(
+        pd.DataFrame(rows),
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        key="air_editor",
+        column_config={
+            "저장": st.column_config.CheckboxColumn("저장", width="small"),
+            "확신도": st.column_config.TextColumn("확신도", disabled=True, width="small"),
+            "근거": st.column_config.TextColumn("근거", disabled=True),
+        },
+    )
+
+    if st.button("💾 확인한 내용 저장하기", type="primary"):
+        saved, failed = 0, []
+        for _, row in edited.iterrows():
+            if not row.get("저장"):
+                continue
+            dstr = str(row.get("날짜", "")).strip()
+            target = str(row.get("매장" if is_sosajang else "이름", "")).strip()
+            code = str(row.get("출근보고" if is_sosajang else "근태", "")).strip()
+            memo = str(row.get("메모", "") or "").strip()
+            if not dstr or not target:
+                continue
+            if is_sosajang:
+                close_code = str(row.get("퇴근보고", "") or "").strip()
+                db.upsert_store_attendance(
+                    store=target, work_date=dstr, open_code=code,
+                    close_code=close_code,
+                    perf_code=("O" if code.lower() == "o" else code),
+                    memo=memo,
+                )
+                saved += 1
+            else:
+                matches = db.find_user_by_name(target, res_category)
+                if not matches:
+                    failed.append(f"{dstr} {target} (등록된 계정 없음)")
+                    continue
+                if len(matches) > 1:
+                    failed.append(f"{dstr} {target} (동명이인 {len(matches)}명 — 직접 입력해주세요)")
+                    continue
+                db.upsert_attendance(matches[0]["id"], dstr, code, memo)
+                saved += 1
+
+        if st.session_state.get("air_review_id"):
+            db.update_kakao_review(st.session_state["air_review_id"], status="applied")
+        st.success(f"{saved}건 저장했어요. '반영 현황 캘린더' 탭에서 바로 확인할 수 있어요.")
+        if failed:
+            st.warning("아래 항목은 저장하지 못했어요:\n\n" + "\n".join(f"- {f}" for f in failed))
+
+    _recent_reviews_view()
+
+
+def _recent_reviews_view():
+    reviews = db.list_kakao_reviews(limit=10)
+    if not reviews:
+        return
+    with st.expander("🕘 지난 검토 기록 다시 보기"):
+        for rv in reviews:
+            mark = "✅ 반영됨" if rv["status"] == "applied" else "⏳ 미반영"
+            cols = st.columns([3, 1])
+            with cols[0]:
+                st.markdown(f"**{rv['category']} · {rv['target_month']}** {mark}")
+                st.caption(rv["created_at"][:16].replace("T", " "))
+            with cols[1]:
+                if st.button("불러오기", key=f"air_load_{rv['id']}"):
+                    full = db.get_kakao_review(rv["id"])
+                    st.session_state["air_result"] = ai_review.from_json(full["result_json"])
+                    st.session_state["air_review_id"] = rv["id"]
+                    st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# 엑셀 내보내기 — 근태 양식 4종 + 출퇴근 현황 파일 기재
+# ---------------------------------------------------------------------------
+def _month_bounds(year, month):
+    start = date(year, month, 1)
+    end = date(year, 12, 31) if month == 12 else date(year, month + 1, 1) - timedelta(days=1)
+    return start, end
+
+
+def _person_records(category, start, end):
+    """{(이름, 'YYYY-MM-DD'): 코드}, {(이름, 날짜): 메모}"""
+    rows = db.get_all_attendance(start.isoformat(), end.isoformat(), category=category)
+    recs = {(r["name"], r["work_date"]): r["code"] for r in rows}
+    memos = {(r["name"], r["work_date"]): (r["memo"] or "") for r in rows if r.get("memo")}
+    return recs, memos
+
+
+def _store_records(start, end):
+    """{(매장, 'YYYY-MM-DD'): {'open','close','perf','memo'}}"""
+    out = {}
+    for r in db.get_store_attendance(start.isoformat(), end.isoformat()):
+        out[(r["store"], r["work_date"])] = {
+            "open": r["open_code"] or "",
+            "close": r["close_code"] or "",
+            "perf": r["perf_code"] or "",
+            "memo": r["memo"] or "",
+        }
+    return out
+
+
+def _report_caption(rep):
+    bits = [f"{rep.get('written', 0)}칸 기재"]
+    if rep.get("skipped_rows"):
+        bits.append(f"⚠️ 양식 줄 수 부족으로 {rep['skipped_rows']}명 누락")
+    if rep.get("gaps_dropped"):
+        bits.append("인원이 많아 매장 사이 빈 줄은 생략")
+    um = rep.get("unmatched") or []
+    if um:
+        bits.append(f"⚠️ 양식에서 못 찾은 대상 {len(um)}건")
+    st.caption(" · ".join(bits))
+    if um:
+        with st.expander(f"못 찾은 {len(um)}건 보기"):
+            st.write(um[:100])
+    if rep.get("unknown_codes"):
+        with st.expander(f"규정표에 없어 메모로만 넣은 코드 {len(rep['unknown_codes'])}건"):
+            st.write(rep["unknown_codes"][:100])
+
+
+def excel_export_view(user):
+    st.subheader("엑셀 내보내기")
+    st.caption(
+        "DB에 저장된 근태를 실제 쓰시는 엑셀 양식에 그대로 채워서 내려받는 곳이에요. "
+        "수식은 건드리지 않고 값만 채워 넣습니다."
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        year = st.number_input("연도", 2020, 2100, date.today().year, 1, key="exp_year")
+    with c2:
+        month = st.number_input("월", 1, 12, date.today().month, 1, key="exp_month")
+    year, month = int(year), int(month)
+    start, end = _month_bounds(year, month)
+    stamp = f"{year}년_{month:02d}월"
+
+    st.divider()
+    st.markdown("### 1️⃣ 근태 양식 4종")
+    st.caption("빈 양식에 이번 달 근태를 채워서 바로 내려받아요. 명단은 '직원 계정관리'에 등록된 사람 기준이에요.")
+
+    # --- 본사 근태 양식 ---
+    with st.container(border=True):
+        st.markdown("**본사 근태 양식**")
+        if st.button("만들기", key="exp_bonsa"):
+            roster = [
+                {"name": e["name"], "department": e["department"]}
+                for e in db.list_users(include_inactive=False) if e["category"] == "본사"
+            ]
+            roster.sort(key=lambda e: (db.DEPARTMENTS.index(e["department"])
+                                       if e["department"] in db.DEPARTMENTS else 99, e["name"]))
+            recs, _ = _person_records("본사", start, end)
+            try:
+                data, rep = excel_export.build_bonsa_form(year, month, roster, recs)
+                st.session_state["exp_bonsa_out"] = (data, rep)
+            except Exception as e:
+                st.error(str(e))
+        if st.session_state.get("exp_bonsa_out"):
+            data, rep = st.session_state["exp_bonsa_out"]
+            _report_caption(rep)
+            st.download_button("⬇️ 본사 근태 양식 내려받기", data,
+                               file_name=f"{stamp}_본사_근태.xlsx", key="exp_bonsa_dl",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    # --- 직영점 근태 양식 ---
+    with st.container(border=True):
+        st.markdown("**직영점 근태 양식**")
+        if st.button("만들기", key="exp_jik"):
+            roster = [
+                {"name": e["name"], "department": e["department"]}
+                for e in db.list_users(include_inactive=False) if e["category"] == "직영"
+            ]
+            recs, _ = _person_records("직영", start, end)
+            try:
+                data, rep = excel_export.build_jikyeong_form(
+                    year, month, roster, recs, store_order=db.JIKYEONG_STORES
+                )
+                st.session_state["exp_jik_out"] = (data, rep)
+            except Exception as e:
+                st.error(str(e))
+        if st.session_state.get("exp_jik_out"):
+            data, rep = st.session_state["exp_jik_out"]
+            _report_caption(rep)
+            st.download_button("⬇️ 직영점 근태 양식 내려받기", data,
+                               file_name=f"{stamp}_직영점_근태.xlsx", key="exp_jik_dl",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    # --- 소사장 근태 + 실적보고 ---
+    with st.container(border=True):
+        st.markdown("**소사장 근태 양식 · 소사장 실적보고 양식**")
+        st.caption("소사장은 매장 단위라 하루에 출근보고/퇴근보고 두 칸이 들어가요.")
+        if st.button("만들기", key="exp_sosa"):
+            sr = _store_records(start, end)
+            try:
+                d1, r1 = excel_export.build_sosajang_form(year, month, sr)
+                d2, r2 = excel_export.build_sosajang_perf_form(year, month, sr)
+                st.session_state["exp_sosa_out"] = (d1, r1, d2, r2)
+            except Exception as e:
+                st.error(str(e))
+        if st.session_state.get("exp_sosa_out"):
+            d1, r1, d2, r2 = st.session_state["exp_sosa_out"]
+            _report_caption(r1)
+            st.download_button("⬇️ 소사장 근태 양식 내려받기", d1,
+                               file_name=f"{stamp}_소사장_근태.xlsx", key="exp_sosa_dl1",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button("⬇️ 소사장 실적보고 양식 내려받기", d2,
+                               file_name=f"{stamp}_소사장_실적보고.xlsx", key="exp_sosa_dl2",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    st.divider()
+    st.markdown("### 2️⃣ 출퇴근 현황 파일 채우기")
+    st.caption(
+        "쓰시던 월간 출퇴근 현황 파일을 그대로 올리면, '▶ 데이터' 탭의 해당 열만 채워서 돌려드려요. "
+        "나머지 시트·수식·지문 기록은 손대지 않아요."
+    )
+
+    # --- 본사·직영 → G~U ---
+    with st.container(border=True):
+        st.markdown("**출퇴근 현황 (본사·직영) → ▶ 데이터 탭 G~U열**")
+        f1 = st.file_uploader("파일 올리기 (.xlsx)", type=["xlsx"], key="exp_st_bj")
+        clear1 = st.checkbox("기존에 적혀 있던 G~U 값은 지우고 새로 채우기", True, key="exp_st_bj_clear")
+        if f1 is not None and st.button("채우기", key="exp_st_bj_run"):
+            recs_b, memo_b = _person_records("본사", start, end)
+            recs_j, memo_j = _person_records("직영", start, end)
+            recs = {**recs_b, **recs_j}
+            memos = {**memo_b, **memo_j}
+            try:
+                with st.spinner("파일을 채우는 중이에요…"):
+                    data, rep = excel_export.fill_status_bonsa_jikyeong(
+                        f1.getvalue(), year, month, recs, memos, clear_existing=clear1
+                    )
+                st.session_state["exp_st_bj_out"] = (data, rep, f1.name)
+            except Exception as e:
+                st.error(str(e))
+        if st.session_state.get("exp_st_bj_out"):
+            data, rep, fname = st.session_state["exp_st_bj_out"]
+            st.caption(f"데이터 탭 {rep.get('rows',0):,}행 중 {rep.get('written',0)}칸 기재")
+            _report_caption(rep)
+            st.download_button("⬇️ 채워진 파일 내려받기", data, file_name=fname, key="exp_st_bj_dl",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    # --- 소사장 → K~AH ---
+    with st.container(border=True):
+        st.markdown("**출퇴근 현황 (소사장) → ▶ 데이터 탭 K~AH열**")
+        st.info(
+            "이 파일은 원래 .xls라서 그대로는 수식이 깨져요. "
+            "엑셀에서 열고 **[다른 이름으로 저장] → 파일 형식을 'Excel 통합 문서(*.xlsx)'** 로 저장한 뒤 올려주세요. "
+            "채워진 파일을 받으시면 다시 .xls로 저장하시면 됩니다."
+        )
+        f2 = st.file_uploader("파일 올리기 (.xlsx)", type=["xlsx"], key="exp_st_s")
+        clear2 = st.checkbox("기존에 적혀 있던 K~AH 값은 지우고 새로 채우기", True, key="exp_st_s_clear")
+        unrep = st.checkbox("출첵 기준으로 출근/퇴근 미보고(N·O열)도 자동 체크", False, key="exp_st_s_unrep")
+        if f2 is not None and st.button("채우기", key="exp_st_s_run"):
+            sr = _store_records(start, end)
+            try:
+                with st.spinner("파일을 채우는 중이에요…"):
+                    data, rep = excel_export.fill_status_sosajang(
+                        f2.getvalue(), year, month, sr,
+                        mark_unreported=unrep, clear_existing=clear2,
+                    )
+                st.session_state["exp_st_s_out"] = (data, rep, f2.name)
+            except Exception as e:
+                st.error(str(e))
+        if st.session_state.get("exp_st_s_out"):
+            data, rep, fname = st.session_state["exp_st_s_out"]
+            st.caption(f"데이터 탭 {rep.get('rows',0):,}행 중 {rep.get('written',0)}칸 기재")
+            _report_caption(rep)
+            st.download_button("⬇️ 채워진 파일 내려받기", data, file_name=fname, key="exp_st_s_dl",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 def main():
     if "user" not in st.session_state:
         login_view()
@@ -1236,10 +1676,13 @@ def main():
     st.title("🗂️ (주)대교통신 HR 플랫폼")
 
     view_funcs = {
+        "ai": lambda: ai_review_view(user),
+        "export": lambda: excel_export_view(user),
         "bulk": lambda: bulk_entry_view(user),
         "emp": lambda: employee_view(user),
         "status": lambda: admin_status_view(user),
         "kakao": lambda: kakao_import_view(user),
+        "calendar": lambda: kakao_calendar_view(user),
         "admin": lambda: admin_accounts_view(user),
     }
 
