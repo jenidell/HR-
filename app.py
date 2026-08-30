@@ -89,20 +89,36 @@ def employee_view(user):
         end = st.date_input("조회 종료일", value=date.today(), key="emp_end")
 
     records = db.get_user_attendance(user["id"], start.isoformat(), end.isoformat())
-    if records:
-        df = pd.DataFrame(records)[["work_date", "code", "memo", "updated_at"]]
-        df.columns = ["날짜", "근태코드", "메모", "최종수정"]
-        st.dataframe(df, use_container_width=True, hide_index=True)
-
-        with st.expander("입력 내역 삭제"):
-            date_options = [r["work_date"] for r in records]
-            del_date = st.selectbox("삭제할 날짜 선택", date_options, key="emp_del_date")
-            if st.button("선택한 날짜 삭제", type="secondary", key="emp_del_btn"):
-                db.delete_attendance(user["id"], del_date)
-                st.success(f"{del_date} 근태 입력이 삭제되었습니다.")
-                st.rerun()
-    else:
+    if not records:
         st.info("해당 기간에 입력된 근태 내역이 없습니다.")
+        return
+
+    for r in records:
+        with st.container(border=True):
+            top_l, top_r = st.columns([2, 2])
+            top_l.markdown(f"**{r['work_date']}**")
+            top_r.caption(f"최종수정 {(r['updated_at'] or '')[:16].replace('T', ' ')}")
+
+            code_idx = db.ATTENDANCE_CODES.index(r["code"]) if r["code"] in db.ATTENDANCE_CODES else 0
+            c_code, c_memo = st.columns([1, 2])
+            new_code = c_code.selectbox(
+                "근태코드", db.ATTENDANCE_CODES, index=code_idx,
+                key=f"hist_code_{r['work_date']}", label_visibility="collapsed",
+            )
+            new_memo = c_memo.text_input(
+                "메모", value=r["memo"] or "", key=f"hist_memo_{r['work_date']}",
+                label_visibility="collapsed", placeholder="메모",
+            )
+
+            b_edit, b_del = st.columns(2)
+            if b_edit.button("수정 저장", key=f"hist_edit_{r['work_date']}", use_container_width=True):
+                db.upsert_attendance(user["id"], r["work_date"], new_code, new_memo)
+                st.success(f"{r['work_date']} 근태가 수정되었습니다.")
+                st.rerun()
+            if b_del.button("삭제", key=f"hist_del_{r['work_date']}", type="secondary", use_container_width=True):
+                db.delete_attendance(user["id"], r["work_date"])
+                st.success(f"{r['work_date']} 근태 입력이 삭제되었습니다.")
+                st.rerun()
 
 
 # ---------------------------------------------------------------------------
@@ -258,13 +274,76 @@ def admin_view(user):
             udf_display.columns = ["아이디", "이름", "구분", "부서/매장", "권한"]
             st.dataframe(udf_display, use_container_width=True, hide_index=True)
 
+            with st.expander("직원 정보 수정 / 계정 삭제"):
+                edit_target = st.selectbox(
+                    "대상 직원",
+                    users,
+                    format_func=lambda u: f"{u['name']} ({u['username']}, {u['category']} · {u['department']})",
+                    key="edit_target_select",
+                )
+
+                e_c1, e_c2 = st.columns(2)
+                with e_c1:
+                    edit_name = st.text_input(
+                        "이름", value=edit_target["name"], key=f"edit_name_{edit_target['id']}"
+                    )
+                    edit_category = st.selectbox(
+                        "구분", db.CATEGORIES,
+                        index=db.CATEGORIES.index(edit_target["category"])
+                        if edit_target["category"] in db.CATEGORIES else 0,
+                        key=f"edit_category_{edit_target['id']}",
+                    )
+                with e_c2:
+                    edit_org_options = db.get_org_units(edit_category)
+                    edit_department = st.selectbox(
+                        "부서/매장", edit_org_options,
+                        index=edit_org_options.index(edit_target["department"])
+                        if edit_target["department"] in edit_org_options else 0,
+                        key=f"edit_dept_{edit_target['id']}_{edit_category}",
+                    )
+                    edit_role = st.radio(
+                        "권한", ["employee", "admin"], horizontal=True,
+                        index=0 if edit_target["role"] == "employee" else 1,
+                        format_func=lambda x: "일반 직원" if x == "employee" else "관리자",
+                        key=f"edit_role_{edit_target['id']}",
+                    )
+                edit_new_pw = st.text_input(
+                    "새 비밀번호 (바꿀 때만 입력, 비워두면 기존 비밀번호 유지)",
+                    type="password", key=f"edit_pw_{edit_target['id']}",
+                )
+
+                if st.button("수정 저장", key=f"edit_save_{edit_target['id']}", use_container_width=True):
+                    db.update_user(
+                        edit_target["id"], edit_name.strip(), edit_category, edit_department,
+                        edit_role, edit_new_pw or None,
+                    )
+                    st.success(f"{edit_name} 계정 정보가 수정되었습니다.")
+                    st.rerun()
+
+                st.divider()
+                confirm_del = st.checkbox(
+                    "정말 삭제할게요 (근태 입력 내역도 함께 삭제되며, 되돌릴 수 없어요)",
+                    key=f"confirm_del_{edit_target['id']}",
+                )
+                if st.button(
+                    "계정 완전 삭제", key=f"edit_del_{edit_target['id']}",
+                    type="secondary", use_container_width=True, disabled=not confirm_del,
+                ):
+                    if edit_target["username"] == "admin":
+                        st.error("기본 admin 계정은 삭제할 수 없습니다.")
+                    else:
+                        db.delete_user(edit_target["id"])
+                        st.success(f"{edit_target['name']} 계정이 완전히 삭제되었습니다.")
+                        st.rerun()
+
             with st.expander("계정 비활성화(퇴사 처리)"):
                 target = st.selectbox(
                     "비활성화할 직원",
                     users,
                     format_func=lambda u: f"{u['name']} ({u['username']}, {u['category']} · {u['department']})",
+                    key="deactivate_target_select",
                 )
-                if st.button("선택한 계정 비활성화", type="secondary"):
+                if st.button("선택한 계정 비활성화", type="secondary", key="deactivate_btn"):
                     if target["username"] == "admin":
                         st.error("기본 admin 계정은 비활성화할 수 없습니다.")
                     else:
