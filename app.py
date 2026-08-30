@@ -93,6 +93,14 @@ def employee_view(user):
         df = pd.DataFrame(records)[["work_date", "code", "memo", "updated_at"]]
         df.columns = ["날짜", "근태코드", "메모", "최종수정"]
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+        with st.expander("입력 내역 삭제"):
+            date_options = [r["work_date"] for r in records]
+            del_date = st.selectbox("삭제할 날짜 선택", date_options, key="emp_del_date")
+            if st.button("선택한 날짜 삭제", type="secondary", key="emp_del_btn"):
+                db.delete_attendance(user["id"], del_date)
+                st.success(f"{del_date} 근태 입력이 삭제되었습니다.")
+                st.rerun()
     else:
         st.info("해당 기간에 입력된 근태 내역이 없습니다.")
 
