@@ -19,7 +19,6 @@ from openpyxl import Workbook
 from streamlit_sortables import sort_items
 
 import db
-import ai_review
 import excel_export
 
 st.set_page_config(page_title="(주)대교통신 HR 플랫폼", page_icon="🗂️", layout="wide")
@@ -45,16 +44,13 @@ def _build_bulk_template():
 # 탭 순서 (관리자가 ▲▼ 버튼으로 자유롭게 바꿀 수 있도록 DB 설정에 저장)
 # ---------------------------------------------------------------------------
 TAB_LABELS = {
-    "ai": "카톡 AI 검토",
-    "export": "엑셀 내보내기",
-    "bulk": "근태일괄입력",
-    "emp": "근태개별입력",
-    "status": "전체 근태현황",
     "kakao": "카톡 근태 가져오기",
-    "calendar": "반영 현황 캘린더",
+    "status": "근태 현황",
+    "edit": "근태 수정",
+    "export": "엑셀 내보내기",
     "admin": "직원 계정관리",
 }
-DEFAULT_TAB_ORDER = ["ai", "calendar", "bulk", "emp", "status", "export", "kakao", "admin"]
+DEFAULT_TAB_ORDER = ["kakao", "status", "edit", "export", "admin"]
 _TAB_ORDER_SETTING_KEY = "admin_tab_order"
 
 
@@ -122,80 +118,7 @@ def logout_button():
 # ---------------------------------------------------------------------------
 # 직원용: 근태입력
 # ---------------------------------------------------------------------------
-def employee_view(user):
-    st.header("근태 입력")
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        with st.form("attendance_form"):
-            work_date = st.date_input("날짜", value=date.today())
-            code = st.selectbox("근태 코드", db.ATTENDANCE_CODES)
-            memo = st.text_input("메모 (선택)", placeholder="예: 오전 반차, 결혼식 참석 등")
-            submitted = st.form_submit_button("입력/수정 저장", use_container_width=True)
-        if submitted:
-            db.upsert_attendance(user["id"], work_date.isoformat(), code, memo)
-            st.success(f"{work_date.isoformat()} 근태가 '{code}'(으)로 저장되었습니다.")
-            st.rerun()
-
-    with col2:
-        st.markdown("**근태 코드 안내**")
-        st.caption(
-            "정상출근 · 연차 · 반차 · 지각 · 조퇴 · 특근 · 당직 · 교육 · "
-            "경조 · 예비군 · 무급 · 개인용무 · 휴무 · 기타\n\n"
-            "같은 날짜에 다시 입력하면 기존 내용을 덮어씁니다(수정)."
-        )
-        st.info(
-            "💡 담당자가 '일괄입력'에서 같은 날짜를 저장하면 여기서 입력한 내용도 "
-            "그 내용으로 덮어써요. 평소엔 담당자의 일괄입력을 기본으로 하고, "
-            "개인 입력은 급하게 미리 남겨둘 때만 쓰는 걸 추천해요."
-        )
-
-    st.divider()
-    st.subheader("내 최근 입력 내역")
-
-    default_start = date.today() - timedelta(days=30)
-    c1, c2 = st.columns(2)
-    with c1:
-        start = st.date_input("조회 시작일", value=default_start, key="emp_start")
-    with c2:
-        end = st.date_input("조회 종료일", value=date.today(), key="emp_end")
-
-    records = db.get_user_attendance(user["id"], start.isoformat(), end.isoformat())
-    if not records:
-        st.info("해당 기간에 입력된 근태 내역이 없습니다.")
-        return
-
-    for r in records:
-        with st.container(border=True):
-            top_l, top_r = st.columns([2, 2])
-            top_l.markdown(f"**{r['work_date']}**")
-            top_r.caption(f"최종수정 {(r['updated_at'] or '')[:16].replace('T', ' ')}")
-
-            code_idx = db.ATTENDANCE_CODES.index(r["code"]) if r["code"] in db.ATTENDANCE_CODES else 0
-            c_code, c_memo = st.columns([1, 2])
-            new_code = c_code.selectbox(
-                "근태코드", db.ATTENDANCE_CODES, index=code_idx,
-                key=f"hist_code_{r['work_date']}", label_visibility="collapsed",
-            )
-            new_memo = c_memo.text_input(
-                "메모", value=r["memo"] or "", key=f"hist_memo_{r['work_date']}",
-                label_visibility="collapsed", placeholder="메모",
-            )
-
-            b_edit, b_del = st.columns(2)
-            if b_edit.button("수정 저장", key=f"hist_edit_{r['work_date']}", use_container_width=True):
-                db.upsert_attendance(user["id"], r["work_date"], new_code, new_memo)
-                st.success(f"{r['work_date']} 근태가 수정되었습니다.")
-                st.rerun()
-            if b_del.button("삭제", key=f"hist_del_{r['work_date']}", type="secondary", use_container_width=True):
-                db.delete_attendance(user["id"], r["work_date"])
-                st.success(f"{r['work_date']} 근태 입력이 삭제되었습니다.")
-                st.rerun()
-
-
-# ---------------------------------------------------------------------------
-# 일괄입력: 본사 부서 / 직영·소사장 매장 담당자가 하루치 소속 인원 전체를 한번에 입력
-# ---------------------------------------------------------------------------
 def bulk_entry_view(user):
     st.header("일괄입력")
     st.caption("본사 부서, 직영·소사장 매장 담당자가 하루 단위로 소속 인원 전체 근태를 한번에 입력할 수 있어요.")
@@ -328,6 +251,7 @@ _KAKAO_STATUS_MAP = {
     "출근": "정상출근",
     "연차": "연차",
     "반차": "반차",
+    "휴가": "휴가",
     "오전반차": "반차",
     "오후반차": "반차",
     "지각": "지각",
@@ -743,6 +667,21 @@ def kakao_import_view(user):
                 return next((e for e in cat_employees if row["store"] in e["department"]), None)
             return next((e for e in cat_employees if e["name"] == row.get("name")), None)
 
+        # 근태 항목 목록에 없어서 '기타'로 들어간 표현들을 모아서 알려줌
+        unknown = {}
+        for r in parsed:
+            if r.get("code") == "기타" and str(r.get("memo") or "").strip():
+                k = str(r["memo"]).strip()
+                unknown[k] = unknown.get(k, 0) + 1
+        if unknown:
+            items = ", ".join(f"**{k}**({v}건)" for k, v in
+                              sorted(unknown.items(), key=lambda x: -x[1]))
+            st.warning(
+                f"⚠️ 근태 항목에 없는 표현이 있어요 — {items}\n\n"
+                "이대로 저장하면 엑셀에 `기타(휴가)`처럼 원문을 괄호로 남겨드려요. "
+                "자주 쓰는 표현이면 정식 항목으로 추가해드릴 테니 알려주세요."
+            )
+
         matches = [_auto_match(r) for r in parsed]
         unmatched_idx = [i for i, m in enumerate(matches) if m is None]
 
@@ -833,166 +772,8 @@ def kakao_import_view(user):
 # ---------------------------------------------------------------------------
 
 # 본사/직영: 매장(부서) + 직원명 행 x 날짜 열 그리드. 예전 본사근태/직영근태 파일과 동일한 구조.
-def _build_roster_matrix_sheet(wb, sheet_name, employees, att_map, dates):
-    ws = wb.create_sheet(title=sheet_name)
-    weekday_kr = ["월", "화", "수", "목", "금", "토", "일"]
-    n = len(dates)
-
-    ws.cell(row=1, column=1, value=f"{sheet_name} 일정표 (빈 칸 = 정상출근)")
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6 + n)
-
-    ws.cell(row=2, column=1, value="부서/매장")
-    ws.cell(row=2, column=2, value="직원명")
-    for i, d in enumerate(dates):
-        ws.cell(row=2, column=3 + i, value=weekday_kr[d.weekday()])
-    ws.cell(row=2, column=3 + n, value="휴무")
-    ws.cell(row=2, column=4 + n, value="연차")
-    ws.cell(row=2, column=5 + n, value="반차")
-    ws.cell(row=2, column=6 + n, value="합계")
-
-    for i, d in enumerate(dates):
-        ws.cell(row=3, column=3 + i, value=d.strftime("%-m/%-d"))
-
-    r = 4
-    for e in sorted(employees, key=lambda x: (x["department"], x["name"])):
-        ws.cell(row=r, column=1, value=e["department"])
-        ws.cell(row=r, column=2, value=e["name"])
-        hol = annual = half = 0
-        for i, d in enumerate(dates):
-            code = att_map.get((e["id"], d.isoformat()))
-            ws.cell(row=r, column=3 + i, value="" if code in (None, "정상출근") else code)
-            if code == "휴무":
-                hol += 1
-            elif code == "연차":
-                annual += 1
-            elif code == "반차":
-                half += 1
-        ws.cell(row=r, column=3 + n, value=hol)
-        ws.cell(row=r, column=4 + n, value=annual)
-        ws.cell(row=r, column=5 + n, value=half)
-        ws.cell(row=r, column=6 + n, value=hol + annual + half)
-        r += 1
-
-    ws.cell(row=r, column=1, value="재직인원")
-    for i in range(n):
-        ws.cell(row=r, column=3 + i, value=len(employees))
 
 
-# 소사장: 개인별 근태코드를 예전 '출첵' 파일처럼 매장 단위 요약(o/휴/개인/조기퇴근/지각/미입력)으로 변환
-_STORE_STATUS_MAP = {
-    "정상출근": "o",
-    "특근": "o",
-    "당직": "o",
-    "교육": "o",
-    "휴무": "휴",
-    "연차": "개인",
-    "반차": "개인",
-    "무급": "개인",
-    "개인용무": "개인",
-    "경조": "개인",
-    "예비군": "개인",
-    "지각": "지각",
-    "조퇴": "조기퇴근",
-    "기타": "기타",
-}
-
-
-def _store_status_for_date(codes):
-    """같은 매장 소속 직원들의 그날 근태코드 목록 -> 매장 단위 상태 문자열로 요약"""
-    if not codes:
-        return "미입력"
-    statuses = [_STORE_STATUS_MAP.get(c, c) for c in codes]
-    if "o" in statuses:
-        return "o"
-    if all(s == "휴" for s in statuses):
-        return "휴"
-    uniq = []
-    for s in statuses:
-        if s not in uniq:
-            uniq.append(s)
-    return "/".join(uniq)
-
-
-def _build_store_summary_sheet(wb, employees, att_map, dates):
-    ws = wb.create_sheet(title="소사장근태")
-    weekday_kr = ["월", "화", "수", "목", "금", "토", "일"]
-    n = len(dates)
-
-    seen = set()
-    stores = []
-    for e in employees:
-        if e["department"] not in seen:
-            stores.append(e["department"])
-            seen.add(e["department"])
-    ordered_stores = [s for s in db.SOSAJANG_STORES if s in seen] + [s for s in stores if s not in db.SOSAJANG_STORES]
-
-    ws.cell(
-        row=1, column=1,
-        value="소사장 매장별 근태 요약 (o=정상, 휴=휴무, 개인=연차·반차 등 개인사유, 조기퇴근, 지각, 미입력=입력 없음)",
-    )
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=1 + n)
-    ws.cell(row=2, column=1, value="매장명")
-    for i, d in enumerate(dates):
-        ws.cell(row=2, column=2 + i, value=weekday_kr[d.weekday()])
-    for i, d in enumerate(dates):
-        ws.cell(row=3, column=2 + i, value=d.strftime("%-m/%-d"))
-
-    emp_by_store = {}
-    for e in employees:
-        emp_by_store.setdefault(e["department"], []).append(e)
-
-    r = 4
-    for store in ordered_stores:
-        ws.cell(row=r, column=1, value=store)
-        for i, d in enumerate(dates):
-            ds = d.isoformat()
-            codes = [att_map.get((e["id"], ds)) for e in emp_by_store.get(store, [])]
-            codes = [c for c in codes if c]
-            ws.cell(row=r, column=2 + i, value=_store_status_for_date(codes))
-        r += 1
-
-
-def build_category_format_excel(start_date, end_date):
-    """본사근태 / 직영근태 / 소사장근태 - 예전에 쓰던 파일과 같은 서식으로 엑셀 생성 (구분별 시트 분리)"""
-    dates = []
-    d = start_date
-    while d <= end_date:
-        dates.append(d)
-        d += timedelta(days=1)
-    if not dates:
-        return None
-
-    all_employees = db.list_users(include_inactive=False)
-    wb = Workbook()
-    wb.remove(wb.active)
-    made_sheet = False
-
-    for category, sheet_name in [("본사", "본사근태"), ("직영", "직영근태")]:
-        emps = [e for e in all_employees if e["category"] == category]
-        if not emps:
-            continue
-        records = db.get_attendance_records_for_matrix(category, start_date.isoformat(), end_date.isoformat())
-        att_map = {(r["user_id"], r["work_date"]): r["code"] for r in records}
-        _build_roster_matrix_sheet(wb, sheet_name, emps, att_map, dates)
-        made_sheet = True
-
-    sosajang_emps = [e for e in all_employees if e["category"] == "소사장"]
-    if sosajang_emps:
-        records = db.get_attendance_records_for_matrix("소사장", start_date.isoformat(), end_date.isoformat())
-        att_map = {(r["user_id"], r["work_date"]): r["code"] for r in records}
-        _build_store_summary_sheet(wb, sosajang_emps, att_map, dates)
-        made_sheet = True
-
-    if not made_sheet:
-        return None
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
-
-# ---------------------------------------------------------------------------
-# 관리자용: 전체 근태현황
-# ---------------------------------------------------------------------------
 def admin_status_view(user):
     st.subheader("근태 미입력 매장/부서 확인")
     check_date = st.date_input("확인할 날짜", value=date.today(), key="missing_check_date")
@@ -1024,23 +805,6 @@ def admin_status_view(user):
             org_options = ["전체"] + db.get_org_units(category)
         org_unit = st.selectbox("부서/매장", org_options, key=f"admin_org_{category}")
 
-    st.markdown("**근태표 양식으로 다운로드 (본사·직영·소사장 원본 서식)**")
-    st.caption(
-        "예전에 쓰시던 본사근태·직영근태 파일과 같은 매장/부서·직원명 × 날짜 표, "
-        "소사장근태(출첵) 파일과 같은 매장 단위 요약표로 시트를 나눠서 받아요. "
-        "위 조회 시작일/종료일 기준으로 만들어집니다."
-    )
-    matrix_bytes = build_category_format_excel(start, end)
-    if matrix_bytes:
-        st.download_button(
-            "근태표 양식 엑셀 다운로드",
-            data=matrix_bytes,
-            file_name=f"근태표_{start.isoformat()}_{end.isoformat()}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="matrix_download",
-        )
-    else:
-        st.info("등록된 직원이 없어 근태표를 만들 수 없습니다.")
 
     st.divider()
 
@@ -1305,226 +1069,7 @@ def admin_accounts_view(user):
 # ---------------------------------------------------------------------------
 # 카톡 AI 검토 — 카톡 대화를 AI가 읽고, 오타·누락·애매한 건을 골라내 알려줌
 # ---------------------------------------------------------------------------
-def _roster_for(category):
-    """AI에게 알려줄 명단 (본사·직영은 직원 이름, 소사장은 매장명)"""
-    if category == "소사장":
-        return list(db.SOSAJANG_STORES)
-    return [
-        f"{e['name']} ({e['department']})"
-        for e in db.list_users(include_inactive=False)
-        if e["category"] == category
-    ]
 
-
-_ISSUE_ICON = {
-    "오타": "✏️", "누락": "🕳️", "중복": "♻️", "확인필요": "❓", "규정위반": "🚨",
-}
-
-
-def ai_review_view(user):
-    st.subheader("카톡 AI 검토")
-    st.caption(
-        "카톡 대화를 그대로 올리면 AI가 읽고 ①어떤 근태가 올라왔는지 정리하고 "
-        "②오타·안 올라온 사람·중복·애매해서 물어봐야 하는 건을 골라서 알려줘요. "
-        "내용을 확인하고 고친 다음 저장하면 근태 현황과 캘린더에 바로 반영돼요."
-    )
-
-    if not ai_review.is_configured():
-        st.warning(
-            "AI 검토를 쓰려면 Anthropic API 키가 필요해요. (앱 코드나 GitHub에는 절대 안 들어갑니다)\n\n"
-            "1. console.anthropic.com 에서 API 키를 발급받으세요 (사용한 만큼 과금돼요)\n"
-            "2. Streamlit Cloud에서 이 앱 → 우측 상단 ⋮ → **Settings → Secrets** 에 아래 한 줄을 붙여넣고 저장\n"
-            "```\nANTHROPIC_API_KEY = \"sk-ant-여기에-발급받은-키\"\n```\n"
-            "3. 앱이 자동으로 재시작되면 이 화면에서 바로 쓸 수 있어요."
-        )
-        st.divider()
-
-    c1, c2, c3 = st.columns([2, 1, 1])
-    with c1:
-        category = st.selectbox("구분", db.CATEGORIES, key="air_category")
-    with c2:
-        year = st.number_input("연도", 2020, 2100, date.today().year, 1, key="air_year")
-    with c3:
-        month = st.number_input("월", 1, 12, date.today().month, 1, key="air_month")
-
-    up = st.file_uploader("카톡 대화 내보내기 파일 (.txt)", type=["txt"], key="air_file")
-    text = st.text_area(
-        "또는 대화 내용을 여기에 붙여넣기",
-        height=160,
-        key="air_text",
-        placeholder="카톡 대화를 길게 눌러 복사한 뒤 붙여넣어도 돼요.",
-    )
-    if up is not None:
-        text = _decode_uploaded_text(up)
-        st.caption(f"📎 {up.name} — {len(text):,}자를 읽었어요.")
-
-    model = db.get_setting("ai_model", ai_review.DEFAULT_MODEL)
-
-    if st.button("🔍 AI 검토 시작", type="primary", disabled=not (text or "").strip()):
-        roster = _roster_for(category)
-        # 카톡 파일에는 보통 여러 달이 통째로 들어있어요.
-        # 고른 달 구간만 잘라서 보내면 요금이 훨씬 적게 나오고 판단도 정확해져요.
-        before = len(text)
-        text, found = ai_review.filter_month(text, int(year), int(month))
-        if found and before > 0:
-            st.caption(
-                f"📄 {before:,}자 중 {int(year)}년 {int(month)}월 구간 {len(text):,}자만 검토해요"
-                f" (약 {100 - int(len(text) / before * 100)}% 절약)"
-            )
-        if not text.strip():
-            st.warning(
-                f"올리신 파일에 {int(year)}년 {int(month)}월 대화가 없어요. 연도·월을 확인해주세요."
-            )
-            st.stop()
-        try:
-            box = st.empty()
-
-            def _progress(i, n):
-                box.info(f"검토 중… ({i}/{n} 조각)" if n > 1 else "검토 중…")
-
-            with st.spinner("AI가 카톡 내용을 읽고 있어요…"):
-                result = ai_review.review_kakao(
-                    category, text, roster, int(year), int(month),
-                    model=model, progress=_progress,
-                )
-            box.empty()
-            rid = db.save_kakao_review(
-                category, f"{int(year):04d}-{int(month):02d}", ai_review.to_json(result)
-            )
-            st.session_state["air_result"] = result
-            st.session_state["air_review_id"] = rid
-        except Exception as e:
-            st.error(f"검토 중 문제가 생겼어요.\n\n{e}")
-
-    result = st.session_state.get("air_result")
-    if not result:
-        st.info("아직 검토한 내용이 없어요. 카톡 대화를 올리고 위 버튼을 눌러주세요.")
-        _recent_reviews_view()
-        return
-
-    st.divider()
-    # 지난 검토를 불러온 경우 위쪽 선택칸과 다를 수 있으므로, 결과 자체에 적힌 구분·월을 따른다
-    res_category = result.get("category") or category
-    res_year = int(result.get("year") or year)
-    res_month = int(result.get("month") or month)
-    st.markdown(f"#### 📄 {res_category} · {res_year}년 {res_month}월 검토 결과")
-    if result.get("summary"):
-        st.markdown(f"**📌 검토 요약**\n\n{result['summary']}")
-
-    issues = result.get("issues") or []
-    st.markdown(f"### ⚠️ 확인이 필요한 것 ({len(issues)}건)")
-    if not issues:
-        st.success("이상한 점은 발견되지 않았어요.")
-    else:
-        for kind in ["확인필요", "오타", "누락", "중복", "규정위반"]:
-            group = [i for i in issues if i.get("kind") == kind]
-            if not group:
-                continue
-            with st.expander(f"{_ISSUE_ICON.get(kind,'•')} {kind} ({len(group)}건)", expanded=(kind == "확인필요")):
-                for it in group:
-                    head = " ".join(x for x in [it.get("date", ""), it.get("target", "")] if x)
-                    st.markdown(f"- **{head}** {it.get('detail','')}")
-                    if it.get("suggestion"):
-                        st.caption(f"　→ {it['suggestion']}")
-
-    records = result.get("records") or []
-    st.markdown(f"### 📋 읽어낸 근태 내용 ({len(records)}건)")
-    st.caption(
-        "표를 직접 고칠 수 있어요. 잘못된 줄은 맨 왼쪽 칸을 체크 해제하면 저장에서 빠져요. "
-        "다 고치셨으면 아래 저장 버튼을 눌러주세요."
-    )
-    if not records:
-        st.info("카톡에서 확인된 근태 기록이 없어요.")
-        return
-
-    is_sosajang = (res_category == "소사장")
-    rows = []
-    for r in records:
-        rows.append({
-            "저장": (r.get("confidence") != "low"),
-            "날짜": r.get("date", ""),
-            ("매장" if is_sosajang else "이름"): r.get("target", ""),
-            ("출근보고" if is_sosajang else "근태"): r.get("code", ""),
-            **({"퇴근보고": r.get("close_code", "")} if is_sosajang else {}),
-            "메모": r.get("memo", ""),
-            "확신도": r.get("confidence", ""),
-            "근거": r.get("source", ""),
-        })
-    edited = st.data_editor(
-        pd.DataFrame(rows),
-        use_container_width=True,
-        hide_index=True,
-        num_rows="dynamic",
-        key="air_editor",
-        column_config={
-            "저장": st.column_config.CheckboxColumn("저장", width="small"),
-            "확신도": st.column_config.TextColumn("확신도", disabled=True, width="small"),
-            "근거": st.column_config.TextColumn("근거", disabled=True),
-        },
-    )
-
-    if st.button("💾 확인한 내용 저장하기", type="primary"):
-        saved, failed = 0, []
-        for _, row in edited.iterrows():
-            if not row.get("저장"):
-                continue
-            dstr = str(row.get("날짜", "")).strip()
-            target = str(row.get("매장" if is_sosajang else "이름", "")).strip()
-            code = str(row.get("출근보고" if is_sosajang else "근태", "")).strip()
-            memo = str(row.get("메모", "") or "").strip()
-            if not dstr or not target:
-                continue
-            if is_sosajang:
-                close_code = str(row.get("퇴근보고", "") or "").strip()
-                db.upsert_store_attendance(
-                    store=target, work_date=dstr, open_code=code,
-                    close_code=close_code,
-                    perf_code=("O" if code.lower() == "o" else code),
-                    memo=memo,
-                )
-                saved += 1
-            else:
-                matches = db.find_user_by_name(target, res_category)
-                if not matches:
-                    failed.append(f"{dstr} {target} (등록된 계정 없음)")
-                    continue
-                if len(matches) > 1:
-                    failed.append(f"{dstr} {target} (동명이인 {len(matches)}명 — 직접 입력해주세요)")
-                    continue
-                db.upsert_attendance(matches[0]["id"], dstr, code, memo)
-                saved += 1
-
-        if st.session_state.get("air_review_id"):
-            db.update_kakao_review(st.session_state["air_review_id"], status="applied")
-        st.success(f"{saved}건 저장했어요. '반영 현황 캘린더' 탭에서 바로 확인할 수 있어요.")
-        if failed:
-            st.warning("아래 항목은 저장하지 못했어요:\n\n" + "\n".join(f"- {f}" for f in failed))
-
-    _recent_reviews_view()
-
-
-def _recent_reviews_view():
-    reviews = db.list_kakao_reviews(limit=10)
-    if not reviews:
-        return
-    with st.expander("🕘 지난 검토 기록 다시 보기"):
-        for rv in reviews:
-            mark = "✅ 반영됨" if rv["status"] == "applied" else "⏳ 미반영"
-            cols = st.columns([3, 1])
-            with cols[0]:
-                st.markdown(f"**{rv['category']} · {rv['target_month']}** {mark}")
-                st.caption(rv["created_at"][:16].replace("T", " "))
-            with cols[1]:
-                if st.button("불러오기", key=f"air_load_{rv['id']}"):
-                    full = db.get_kakao_review(rv["id"])
-                    st.session_state["air_result"] = ai_review.from_json(full["result_json"])
-                    st.session_state["air_review_id"] = rv["id"]
-                    st.rerun()
-
-
-# ---------------------------------------------------------------------------
-# 엑셀 내보내기 — 근태 양식 4종 + 출퇴근 현황 파일 기재
-# ---------------------------------------------------------------------------
 def _month_bounds(year, month):
     start = date(year, month, 1)
     end = date(year, 12, 31) if month == 12 else date(year, month + 1, 1) - timedelta(days=1)
@@ -1554,6 +1099,8 @@ def _store_records(start, end):
 
 def _report_caption(rep):
     bits = [f"{rep.get('written', 0)}칸 기재"]
+    if rep.get("roster"):
+        bits.append(f"양식 명단 {rep['roster']}명·매장")
     if rep.get("skipped_rows"):
         bits.append(f"⚠️ 양식 줄 수 부족으로 {rep['skipped_rows']}명 누락")
     if rep.get("gaps_dropped"):
@@ -1568,6 +1115,9 @@ def _report_caption(rep):
     if rep.get("unknown_codes"):
         with st.expander(f"규정표에 없어 메모로만 넣은 코드 {len(rep['unknown_codes'])}건"):
             st.write(rep["unknown_codes"][:100])
+
+
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def excel_export_view(user):
@@ -1587,137 +1137,292 @@ def excel_export_view(user):
     stamp = f"{year}년_{month:02d}월"
 
     st.divider()
-    st.markdown("### 1️⃣ 근태 양식 4종")
-    st.caption("빈 양식에 이번 달 근태를 채워서 바로 내려받아요. 명단은 '직원 계정관리'에 등록된 사람 기준이에요.")
+    # 화면이 길어져서 모바일에서 아래쪽 기능이 안 보인다는 얘기가 있어 두 단계로 나눔
+    step = st.radio(
+        "단계 선택",
+        ["1️⃣ 근태 양식 4종 만들기", "2️⃣ 출퇴근 현황 파일 채우기"],
+        horizontal=True, key="exp_step", label_visibility="collapsed",
+    )
+    st.divider()
 
-    # --- 본사 근태 양식 ---
-    with st.container(border=True):
-        st.markdown("**본사 근태 양식**")
-        if st.button("만들기", key="exp_bonsa"):
-            roster = [
-                {"name": e["name"], "department": e["department"]}
-                for e in db.list_users(include_inactive=False) if e["category"] == "본사"
-            ]
+    if step.startswith("1"):
+        st.info(
+            "**쓰시던 빈 양식 파일을 올려주세요.** 그 파일에 값만 채워서 돌려드려요 — "
+            "서식·수식·셀 메모·인쇄설정이 원본 그대로 유지됩니다. 명단도 양식에 있는 그대로 씁니다.\n\n"
+            "안 올리시면 앱에 들어있는 기본 양식으로 만들어드리는데, 이건 서식이 원본과 조금 다를 수 있어요."
+        )
+
+        def _form_block(title, key, build_fn, upload_fn, filename, caption=None):
+            """양식 하나에 대한 '내 파일 올리기 → 만들기 → 내려받기' 묶음"""
+            with st.container(border=True):
+                st.markdown(f"**{title}**")
+                if caption:
+                    st.caption(caption)
+                up = st.file_uploader(
+                    "내 양식 파일 올리기 (.xlsx) — 안 올리면 기본 양식 사용",
+                    type=["xlsx"], key=f"{key}_up",
+                )
+                if st.button("만들기", key=key):
+                    try:
+                        if up is not None:
+                            st.session_state[f"{key}_out"] = upload_fn(up.getvalue())
+                        else:
+                            st.session_state[f"{key}_out"] = build_fn()
+                    except Exception as e:
+                        st.error(str(e))
+                        st.session_state.pop(f"{key}_out", None)
+                out = st.session_state.get(f"{key}_out")
+                if out:
+                    data, rep = out
+                    _report_caption(rep)
+                    st.download_button(f"⬇️ {title} 내려받기", data, file_name=filename,
+                                       key=f"{key}_dl", mime=_XLSX_MIME)
+
+        # --- 본사 ---
+        def _bonsa_build():
+            roster = [{"name": e["name"], "department": e["department"]}
+                      for e in db.list_users(include_inactive=False) if e["category"] == "본사"]
             roster.sort(key=lambda e: (db.DEPARTMENTS.index(e["department"])
                                        if e["department"] in db.DEPARTMENTS else 99, e["name"]))
-            recs, _ = _person_records("본사", start, end)
-            try:
-                data, rep = excel_export.build_bonsa_form(year, month, roster, recs)
-                st.session_state["exp_bonsa_out"] = (data, rep)
-            except Exception as e:
-                st.error(str(e))
-        if st.session_state.get("exp_bonsa_out"):
-            data, rep = st.session_state["exp_bonsa_out"]
-            _report_caption(rep)
-            st.download_button("⬇️ 본사 근태 양식 내려받기", data,
-                               file_name=f"{stamp}_본사_근태.xlsx", key="exp_bonsa_dl",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            recs, memos = _person_records("본사", start, end)
+            return excel_export.build_bonsa_form(year, month, roster, recs, memos)
 
-    # --- 직영점 근태 양식 ---
-    with st.container(border=True):
-        st.markdown("**직영점 근태 양식**")
-        if st.button("만들기", key="exp_jik"):
-            roster = [
-                {"name": e["name"], "department": e["department"]}
-                for e in db.list_users(include_inactive=False) if e["category"] == "직영"
-            ]
-            recs, _ = _person_records("직영", start, end)
-            try:
-                data, rep = excel_export.build_jikyeong_form(
-                    year, month, roster, recs, store_order=db.JIKYEONG_STORES
-                )
-                st.session_state["exp_jik_out"] = (data, rep)
-            except Exception as e:
-                st.error(str(e))
-        if st.session_state.get("exp_jik_out"):
-            data, rep = st.session_state["exp_jik_out"]
-            _report_caption(rep)
-            st.download_button("⬇️ 직영점 근태 양식 내려받기", data,
-                               file_name=f"{stamp}_직영점_근태.xlsx", key="exp_jik_dl",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        def _bonsa_upload(b):
+            recs, memos = _person_records("본사", start, end)
+            return excel_export.fill_form_bonsa(b, year, month, recs, memos)
 
-    # --- 소사장 근태 + 실적보고 ---
-    with st.container(border=True):
-        st.markdown("**소사장 근태 양식 · 소사장 실적보고 양식**")
-        st.caption("소사장은 매장 단위라 하루에 출근보고/퇴근보고 두 칸이 들어가요.")
-        if st.button("만들기", key="exp_sosa"):
-            sr = _store_records(start, end)
-            try:
-                d1, r1 = excel_export.build_sosajang_form(year, month, sr)
-                d2, r2 = excel_export.build_sosajang_perf_form(year, month, sr)
-                st.session_state["exp_sosa_out"] = (d1, r1, d2, r2)
-            except Exception as e:
-                st.error(str(e))
-        if st.session_state.get("exp_sosa_out"):
-            d1, r1, d2, r2 = st.session_state["exp_sosa_out"]
-            _report_caption(r1)
-            st.download_button("⬇️ 소사장 근태 양식 내려받기", d1,
-                               file_name=f"{stamp}_소사장_근태.xlsx", key="exp_sosa_dl1",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            st.download_button("⬇️ 소사장 실적보고 양식 내려받기", d2,
-                               file_name=f"{stamp}_소사장_실적보고.xlsx", key="exp_sosa_dl2",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        _form_block("본사 근태 양식", "exp_bonsa", _bonsa_build, _bonsa_upload,
+                    f"{stamp}_본사_근태.xlsx")
 
-    st.divider()
-    st.markdown("### 2️⃣ 출퇴근 현황 파일 채우기")
-    st.caption(
-        "쓰시던 월간 출퇴근 현황 파일을 그대로 올리면, '▶ 데이터' 탭의 해당 열만 채워서 돌려드려요. "
-        "나머지 시트·수식·지문 기록은 손대지 않아요."
-    )
+        # --- 직영점 ---
+        def _jik_build():
+            roster = [{"name": e["name"], "department": e["department"]}
+                      for e in db.list_users(include_inactive=False) if e["category"] == "직영"]
+            recs, memos = _person_records("직영", start, end)
+            return excel_export.build_jikyeong_form(year, month, roster, recs, memos,
+                                                    store_order=db.JIKYEONG_STORES)
 
-    # --- 본사·직영 → G~U ---
-    with st.container(border=True):
-        st.markdown("**출퇴근 현황 (본사·직영) → ▶ 데이터 탭 G~U열**")
-        f1 = st.file_uploader("파일 올리기 (.xlsx)", type=["xlsx"], key="exp_st_bj")
-        clear1 = st.checkbox("기존에 적혀 있던 G~U 값은 지우고 새로 채우기", True, key="exp_st_bj_clear")
-        if f1 is not None and st.button("채우기", key="exp_st_bj_run"):
-            recs_b, memo_b = _person_records("본사", start, end)
-            recs_j, memo_j = _person_records("직영", start, end)
-            recs = {**recs_b, **recs_j}
-            memos = {**memo_b, **memo_j}
-            try:
-                with st.spinner("파일을 채우는 중이에요…"):
-                    data, rep = excel_export.fill_status_bonsa_jikyeong(
-                        f1.getvalue(), year, month, recs, memos, clear_existing=clear1
-                    )
-                st.session_state["exp_st_bj_out"] = (data, rep, f1.name)
-            except Exception as e:
-                st.error(str(e))
-        if st.session_state.get("exp_st_bj_out"):
-            data, rep, fname = st.session_state["exp_st_bj_out"]
-            st.caption(f"데이터 탭 {rep.get('rows',0):,}행 중 {rep.get('written',0)}칸 기재")
-            _report_caption(rep)
-            st.download_button("⬇️ 채워진 파일 내려받기", data, file_name=fname, key="exp_st_bj_dl",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        def _jik_upload(b):
+            recs, memos = _person_records("직영", start, end)
+            return excel_export.fill_form_jikyeong(b, year, month, recs, memos)
 
-    # --- 소사장 → K~AH ---
-    with st.container(border=True):
-        st.markdown("**출퇴근 현황 (소사장) → ▶ 데이터 탭 K~AH열**")
-        st.info(
-            "이 파일은 원래 .xls라서 그대로는 수식이 깨져요. "
-            "엑셀에서 열고 **[다른 이름으로 저장] → 파일 형식을 'Excel 통합 문서(*.xlsx)'** 로 저장한 뒤 올려주세요. "
-            "채워진 파일을 받으시면 다시 .xls로 저장하시면 됩니다."
+        _form_block("직영점 근태 양식", "exp_jik", _jik_build, _jik_upload,
+                    f"{stamp}_직영점_근태.xlsx")
+
+        # --- 소사장 근태 ---
+        def _sosa_build():
+            return excel_export.build_sosajang_form(year, month, _store_records(start, end))
+
+        def _sosa_upload(b):
+            return excel_export.fill_form_sosajang(b, year, month, _store_records(start, end))
+
+        _form_block("소사장 근태 양식", "exp_sosa", _sosa_build, _sosa_upload,
+                    f"{stamp}_소사장_근태.xlsx",
+                    caption="소사장은 매장 단위라 하루에 출근보고/퇴근보고 두 칸이 들어가요.")
+
+        # --- 소사장 실적보고 ---
+        def _perf_build():
+            return excel_export.build_sosajang_perf_form(year, month, _store_records(start, end))
+
+        def _perf_upload(b):
+            return excel_export.fill_form_sosajang_perf(b, year, month, _store_records(start, end))
+
+        _form_block("소사장 실적보고 양식", "exp_perf", _perf_build, _perf_upload,
+                    f"{stamp}_소사장_실적보고.xlsx")
+    else:
+
+        st.caption(
+            "쓰시던 월간 출퇴근 현황 파일을 올리면 '▶ 데이터' 탭의 해당 열만 채워서 돌려드려요. "
+            "나머지 시트·수식·지문 기록은 손대지 않아요."
         )
-        f2 = st.file_uploader("파일 올리기 (.xlsx)", type=["xlsx"], key="exp_st_s")
-        clear2 = st.checkbox("기존에 적혀 있던 K~AH 값은 지우고 새로 채우기", True, key="exp_st_s_clear")
-        unrep = st.checkbox("출첵 기준으로 출근/퇴근 미보고(N·O열)도 자동 체크", False, key="exp_st_s_unrep")
-        if f2 is not None and st.button("채우기", key="exp_st_s_run"):
-            sr = _store_records(start, end)
-            try:
-                with st.spinner("파일을 채우는 중이에요…"):
-                    data, rep = excel_export.fill_status_sosajang(
-                        f2.getvalue(), year, month, sr,
-                        mark_unreported=unrep, clear_existing=clear2,
-                    )
-                st.session_state["exp_st_s_out"] = (data, rep, f2.name)
-            except Exception as e:
-                st.error(str(e))
-        if st.session_state.get("exp_st_s_out"):
-            data, rep, fname = st.session_state["exp_st_s_out"]
-            st.caption(f"데이터 탭 {rep.get('rows',0):,}행 중 {rep.get('written',0)}칸 기재")
-            _report_caption(rep)
-            st.download_button("⬇️ 채워진 파일 내려받기", data, file_name=fname, key="exp_st_s_dl",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        src_mode = st.radio(
+            "무엇을 기준으로 채울까요?",
+            ["앱에 저장된 근태 기준", "근태 양식 파일 기준 (내가 고친 양식 올리기)"],
+            key="exp_src_mode",
+            help="양식을 내려받아 손으로 고치셨다면 두 번째를 고르세요. 고친 내용 그대로 반영됩니다.",
+        )
+        from_form = src_mode.startswith("근태 양식")
+        st.divider()
+
+        # ---------------- 본사·직영 → G~U ----------------
+        with st.container(border=True):
+            st.markdown("**출퇴근 현황 (본사·직영) → ▶ 데이터 탭 G~U열**")
+            fb = fj = None
+            if from_form:
+                fb = st.file_uploader("본사 근태 양식 (.xlsx)", type=["xlsx"], key="exp_st_fb")
+                fj = st.file_uploader("직영점 근태 양식 (.xlsx)", type=["xlsx"], key="exp_st_fj")
+                st.caption("둘 중 하나만 올리셔도 돼요. 올린 것만 반영됩니다.")
+            f1 = st.file_uploader("채울 출퇴근 현황 파일 (.xlsx)", type=["xlsx"], key="exp_st_bj")
+            clear1 = st.checkbox("기존에 적혀 있던 G~U 값은 지우고 새로 채우기", True, key="exp_st_bj_clear")
+            if f1 is not None and st.button("채우기", key="exp_st_bj_run"):
+                try:
+                    if from_form:
+                        recs, memos = {}, {}
+                        if fb is not None:
+                            r, m = excel_export.read_form_bonsa(fb.getvalue(), year, month)
+                            recs.update(r); memos.update(m)
+                        if fj is not None:
+                            r, m = excel_export.read_form_jikyeong(fj.getvalue(), year, month)
+                            recs.update(r); memos.update(m)
+                        if not recs:
+                            st.warning("근태 양식 파일을 하나 이상 올려주세요.")
+                            st.stop()
+                    else:
+                        rb, mb = _person_records("본사", start, end)
+                        rj, mj = _person_records("직영", start, end)
+                        recs = {**rb, **rj}
+                        memos = {**mb, **mj}
+                    with st.spinner("파일을 채우는 중이에요…"):
+                        data, rep = excel_export.fill_status_bonsa_jikyeong(
+                            f1.getvalue(), year, month, recs, memos, clear_existing=clear1
+                        )
+                    rep["source"] = len(recs)
+                    st.session_state["exp_st_bj_out"] = (data, rep, f1.name)
+                except Exception as e:
+                    st.error(str(e))
+            if st.session_state.get("exp_st_bj_out"):
+                data, rep, fname = st.session_state["exp_st_bj_out"]
+                st.caption(
+                    f"읽어온 근태 {rep.get('source',0)}건 → 데이터 탭 {rep.get('rows',0):,}행 중 "
+                    f"{rep.get('written',0)}칸 기재"
+                )
+                _report_caption(rep)
+                st.download_button("⬇️ 채워진 파일 내려받기", data, file_name=fname,
+                                   key="exp_st_bj_dl", mime=_XLSX_MIME)
+
+        # ---------------- 소사장 → K~AH ----------------
+        with st.container(border=True):
+            st.markdown("**출퇴근 현황 (소사장) → ▶ 데이터 탭 K~AH열**")
+            st.info(
+                "이 파일은 원래 .xls라서 그대로는 수식이 깨져요. 엑셀에서 열고 "
+                "**[다른 이름으로 저장] → 파일 형식을 'Excel 통합 문서(*.xlsx)'** 로 저장한 뒤 올려주세요. "
+                "채워진 파일을 받으시면 다시 .xls로 저장하시면 됩니다."
+            )
+            fs = None
+            if from_form:
+                fs = st.file_uploader("소사장 근태 양식(출첵) (.xlsx)", type=["xlsx"], key="exp_st_fs")
+            f2 = st.file_uploader("채울 출퇴근 현황 파일 (.xlsx)", type=["xlsx"], key="exp_st_s")
+            clear2 = st.checkbox("기존에 적혀 있던 K~AH 값은 지우고 새로 채우기", True, key="exp_st_s_clear")
+            unrep = st.checkbox("출첵 기준으로 출근/퇴근 미보고(N·O열)도 자동 체크", False, key="exp_st_s_unrep")
+            if f2 is not None and st.button("채우기", key="exp_st_s_run"):
+                try:
+                    if from_form:
+                        if fs is None:
+                            st.warning("소사장 근태 양식(출첵) 파일을 올려주세요.")
+                            st.stop()
+                        sr = excel_export.read_form_sosajang(fs.getvalue(), year, month)
+                    else:
+                        sr = _store_records(start, end)
+                    with st.spinner("파일을 채우는 중이에요…"):
+                        data, rep = excel_export.fill_status_sosajang(
+                            f2.getvalue(), year, month, sr,
+                            mark_unreported=unrep, clear_existing=clear2,
+                        )
+                    rep["source"] = len(sr)
+                    st.session_state["exp_st_s_out"] = (data, rep, f2.name)
+                except Exception as e:
+                    st.error(str(e))
+            if st.session_state.get("exp_st_s_out"):
+                data, rep, fname = st.session_state["exp_st_s_out"]
+                st.caption(
+                    f"읽어온 근태 {rep.get('source',0)}건 → 데이터 탭 {rep.get('rows',0):,}행 중 "
+                    f"{rep.get('written',0)}칸 기재"
+                )
+                _report_caption(rep)
+                st.download_button("⬇️ 채워진 파일 내려받기", data, file_name=fname,
+                                   key="exp_st_s_dl", mime=_XLSX_MIME)
+
+def single_edit_view(user):
+    """직원 한 명을 골라서 특정 날짜 근태를 고치는 화면 (빠진 사람·틀린 건 손볼 때)"""
+    c1, c2 = st.columns(2)
+    with c1:
+        category = st.selectbox("구분", db.CATEGORIES, key="se_cat")
+    with c2:
+        org = st.selectbox("부서·매장", db.get_org_units(category), key="se_org")
+
+    emps = db.list_users_by_org(category, org)
+    if not emps:
+        st.info(f"{org}에 등록된 직원이 없어요. '직원 계정관리'에서 먼저 등록해주세요.")
+        return
+
+    c3, c4 = st.columns(2)
+    with c3:
+        name = st.selectbox("직원", [e["name"] for e in emps], key="se_emp")
+    with c4:
+        work_date = st.date_input("날짜", value=date.today(), key="se_date")
+    target = next(e for e in emps if e["name"] == name)
+
+    cur = db.get_attendance_for_date(work_date.isoformat(), category, org).get(target["id"])
+    if cur:
+        st.info(f"현재 저장된 값 — **{cur['code']}**" + (f" ({cur['memo']})" if cur.get("memo") else ""))
+    else:
+        st.caption("이 날짜에 저장된 근태가 아직 없어요.")
+
+    idx = db.ATTENDANCE_CODES.index(cur["code"]) if cur and cur["code"] in db.ATTENDANCE_CODES else 0
+    code = st.selectbox("근태 코드", db.ATTENDANCE_CODES, index=idx, key="se_code")
+    memo = st.text_input("메모 (선택)", value=(cur or {}).get("memo") or "",
+                         placeholder="예: 오전 반차, 결혼식 참석 등", key="se_memo")
+
+    b1, b2 = st.columns(2)
+    with b1:
+        if st.button("저장", type="primary", use_container_width=True, key="se_save"):
+            db.upsert_attendance(target["id"], work_date.isoformat(), code, memo)
+            st.success(f"{name} · {work_date.isoformat()} → '{code}' 저장했어요.")
+            st.rerun()
+    with b2:
+        if cur and st.button("이 날짜 기록 삭제", use_container_width=True, key="se_del"):
+            db.delete_attendance(target["id"], work_date.isoformat())
+            st.success(f"{name} · {work_date.isoformat()} 기록을 지웠어요.")
+            st.rerun()
+
+    st.caption("근태 코드: " + " · ".join(db.ATTENDANCE_CODES))
+    st.divider()
+
+    st.markdown(f"**{name} 님의 이번 달 기록**")
+    first = work_date.replace(day=1)
+    last = (date(first.year + 1, 1, 1) if first.month == 12
+            else date(first.year, first.month + 1, 1)) - timedelta(days=1)
+    rows = db.get_user_attendance(target["id"], first.isoformat(), last.isoformat())
+    if not rows:
+        st.caption("이번 달 기록이 없어요.")
+    else:
+        st.dataframe(
+            pd.DataFrame([{"날짜": r["work_date"], "근태": r["code"], "메모": r["memo"] or ""} for r in rows]),
+            hide_index=True, use_container_width=True,
+        )
+
+
+
+def attendance_status_view(user):
+    """근태 현황 — 달력으로 볼지, 목록으로 볼지 골라서 봅니다."""
+    st.subheader("근태 현황")
+    view = st.radio(
+        "보기 방식",
+        ["📅 달력으로 보기", "📋 목록으로 보기"],
+        horizontal=True, key="status_view_mode", label_visibility="collapsed",
+    )
+    st.divider()
+    if view.startswith("📅"):
+        kakao_calendar_view(user)
+    else:
+        admin_status_view(user)
+
+
+def attendance_edit_view(user):
+    """근태 수정 — 한 명씩 고칠지, 여러 명을 한번에 넣을지 골라서 씁니다."""
+    st.subheader("근태 수정")
+    st.caption("보통은 '카톡 근태 가져오기'로 들어오고, 여기서는 빠진 사람이나 틀린 건만 손봅니다.")
+    mode = st.radio(
+        "입력 방식",
+        ["👤 한 명씩 고치기", "👥 여러 명 한번에 넣기"],
+        horizontal=True, key="edit_view_mode", label_visibility="collapsed",
+    )
+    st.divider()
+    if mode.startswith("👤"):
+        single_edit_view(user)
+    else:
+        bulk_entry_view(user)
+
 
 
 def main():
@@ -1731,13 +1436,10 @@ def main():
     st.title("🗂️ (주)대교통신 HR 플랫폼")
 
     view_funcs = {
-        "ai": lambda: ai_review_view(user),
-        "export": lambda: excel_export_view(user),
-        "bulk": lambda: bulk_entry_view(user),
-        "emp": lambda: employee_view(user),
-        "status": lambda: admin_status_view(user),
         "kakao": lambda: kakao_import_view(user),
-        "calendar": lambda: kakao_calendar_view(user),
+        "status": lambda: attendance_status_view(user),
+        "edit": lambda: attendance_edit_view(user),
+        "export": lambda: excel_export_view(user),
         "admin": lambda: admin_accounts_view(user),
     }
 
@@ -1745,9 +1447,9 @@ def main():
         order = _get_tab_order()
     else:
         # 일반 직원은 근태일괄입력·근태개별입력 2개만, 관리자가 정한 순서를 그대로 따름
-        order = [k for k in _get_tab_order() if k in ("bulk", "emp")]
+        order = [k for k in _get_tab_order() if k in ("edit",)]
         if not order:
-            order = ["bulk", "emp"]
+            order = ["edit"]
 
     tabs = st.tabs([TAB_LABELS[k] for k in order])
     for tab, key in zip(tabs, order):
