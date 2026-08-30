@@ -236,6 +236,14 @@ def deactivate_user(user_id: int):
     conn.close()
 
 
+def activate_user(user_id: int):
+    """비활성화된 계정을 다시 활성화 (되살리기)"""
+    conn = get_conn()
+    conn.execute("UPDATE users SET active = 1 WHERE id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+
+
 def update_user(user_id: int, name: str, category: str, department: str, role: str, new_password: str = None):
     """계정 정보 수정 (이름/구분/부서·매장/권한). new_password를 주면 비밀번호도 함께 변경"""
     conn = get_conn()
