@@ -117,6 +117,18 @@ def init_db():
         )
         """
     )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS announcements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            author_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (author_id) REFERENCES users(id)
+        )
+        """
+    )
     conn.commit()
 
     # 예전 버전(구조 변경 전) DB에는 category 컬럼이 없을 수 있어 마이그레이션
@@ -306,6 +318,85 @@ def upsert_attendance(user_id: int, work_date: str, code: str, memo: str = ""):
     conn.close()
 
 
+def get_org_unit_summary_for_date(work_date: str):
+    """해당 날짜 기준 구분·부서/매장별 재직 인원수와 근태 입력된 인원수를 반환.
+    (관리자 화면의 '미입력 매장/부서 확인'에서 사용)"""
+    conn = get_conn()
+    unit_counts = conn.execute(
+        "SELECT category, department, COUNT(*) as cnt FROM users WHERE active = 1 "
+        "GROUP BY category, department"
+    ).fetchall()
+    entered = conn.execute(
+        """
+        SELECT u.category, u.department, COUNT(DISTINCT a.user_id) as cnt
+        FROM attendance a JOIN users u ON a.user_id = u.id
+        WHERE a.work_date = ?
+        GROUP BY u.category, u.department
+        """,
+        (work_date,),
+    ).fetchall()
+    conn.close()
+
+    entered_map = {(r["category"], r["department"]): r["cnt"] for r in entered}
+    result = []
+    for r in unit_counts:
+        key = (r["category"], r["department"])
+        result.append({
+            "category": r["category"],
+            "department": r["department"],
+            "employee_count": r["cnt"],
+            "entered_count": entered_map.get(key, 0),
+        })
+    return result
+
+
+def get_daily_entry_counts(category: str, org_unit: str, start_date: str, end_date: str):
+    """구분·부서/매장 기준, 기간 내 날짜별 근태 입력 인원수(중복 없이) 반환. 팀장이 '언제 안 올렸는지' 확인하는 용도."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT a.work_date, COUNT(DISTINCT a.user_id) as cnt
+        FROM attendance a JOIN users u ON a.user_id = u.id
+        WHERE u.category = ? AND u.department = ? AND a.work_date >= ? AND a.work_date <= ?
+        GROUP BY a.work_date
+        """,
+        (category, org_unit, start_date, end_date),
+    ).fetchall()
+    conn.close()
+    return {r["work_date"]: r["cnt"] for r in rows}
+
+
+def create_announcement(title: str, content: str, author_id: int):
+    conn = get_conn()
+    now = datetime.now().isoformat()
+    conn.execute(
+        "INSERT INTO announcements (title, content, author_id, created_at) VALUES (?, ?, ?, ?)",
+        (title, content, author_id, now),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_announcements():
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT a.id, a.title, a.content, a.created_at, u.name as author_name
+        FROM announcements a JOIN users u ON a.author_id = u.id
+        ORDER BY a.created_at DESC
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_announcement(announcement_id: int):
+    conn = get_conn()
+    conn.execute("DELETE FROM announcements WHERE id = ?", (announcement_id,))
+    conn.commit()
+    conn.close()
+
+
 def get_user_attendance(user_id: int, start_date: str = None, end_date: str = None):
     conn = get_conn()
     q = "SELECT * FROM attendance WHERE user_id = ?"
@@ -318,6 +409,22 @@ def get_user_attendance(user_id: int, start_date: str = None, end_date: str = No
         params.append(end_date)
     q += " ORDER BY work_date DESC"
     rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_attendance_records_for_matrix(category: str, start_date: str, end_date: str):
+    """구분(본사/직영/소사장)별 근태표(매트릭스) 엑셀 생성용 - user_id 포함 근태 기록 반환.
+    (기존 get_all_attendance는 user_id가 빠져있어 매트릭스 조립에 부족함)"""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT a.user_id, a.work_date, a.code
+        FROM attendance a JOIN users u ON a.user_id = u.id
+        WHERE u.category = ? AND a.work_date >= ? AND a.work_date <= ?
+        """,
+        (category, start_date, end_date),
+    ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
