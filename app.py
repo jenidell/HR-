@@ -114,38 +114,35 @@ def tab_order_settings_view():
 # ---------------------------------------------------------------------------
 # 로그인 / 세션 관리
 # ---------------------------------------------------------------------------
+def _app_password():
+    """Streamlit Secrets에 APP_PASSWORD가 있으면 그 암호 하나로 잠급니다.
+    없으면 아이디·비밀번호 없이 바로 들어갑니다(현재 설정).
+
+    나중에 잠그고 싶으시면 Streamlit Cloud → Settings → Secrets 에 아래 한 줄만 넣으면 돼요.
+        APP_PASSWORD = "원하는암호"
+    """
+    try:
+        if "APP_PASSWORD" in st.secrets:
+            return str(st.secrets["APP_PASSWORD"]).strip()
+    except Exception:
+        pass
+    return None
+
+
 def login_view():
+    """암호가 설정돼 있을 때만 뜨는 잠금 화면 (암호 하나만 입력)"""
     st.title("🗂️ (주)대교통신 HR 플랫폼")
-    st.caption("근태입력 셀프서비스 (Phase 1)")
-
     with st.form("login_form"):
-        username = st.text_input("아이디")
-        password = st.text_input("비밀번호", type="password")
-        submitted = st.form_submit_button("로그인", use_container_width=True)
-
+        password = st.text_input("암호", type="password")
+        submitted = st.form_submit_button("들어가기", use_container_width=True)
     if submitted:
-        user = db.verify_user(username.strip(), password)
-        if user:
-            st.session_state["user"] = user
+        if password == _app_password():
+            st.session_state["unlocked"] = True
             st.rerun()
         else:
-            st.error("아이디 또는 비밀번호가 올바르지 않습니다.")
+            st.error("암호가 올바르지 않습니다.")
 
 
-def logout_button():
-    with st.sidebar:
-        user = st.session_state["user"]
-        st.markdown(f"**{user['name']}**")
-        st.caption(f"{user['category']} · {user['department']}")
-        st.caption("관리자" if user["role"] == "admin" else "직원")
-        if st.button("로그아웃", use_container_width=True):
-            del st.session_state["user"]
-            st.rerun()
-
-
-# ---------------------------------------------------------------------------
-# 직원용: 근태입력
-# ---------------------------------------------------------------------------
 
 def bulk_entry_view(user):
     st.header("일괄입력")
@@ -1183,9 +1180,9 @@ def excel_export_view(user):
 
     if step.startswith("1"):
         st.info(
-            "**쓰시던 빈 양식 파일을 올려주세요.** 그 파일에 값만 채워서 돌려드려요 — "
-            "서식·수식·셀 메모·인쇄설정이 원본 그대로 유지됩니다. 명단도 양식에 있는 그대로 씁니다.\n\n"
-            "안 올리시면 앱에 들어있는 기본 양식으로 만들어드리는데, 이건 서식이 원본과 조금 다를 수 있어요."
+            "**주신 양식이 앱에 들어있어요.** '만들기'만 누르면 그 양식에 이번 달 근태를 채워서 "
+            "바로 내려받을 수 있어요 — 서식·수식·셀 메모·인쇄설정이 원본 그대로 유지됩니다.\n\n"
+            "(개인정보는 지워둔 빈 양식이고, 명단은 '직원 계정관리'에 등록된 사람으로 채워요.)"
         )
 
         def _form_block(title, key, build_fn, upload_fn, filename, caption=None):
@@ -1194,10 +1191,9 @@ def excel_export_view(user):
                 st.markdown(f"**{title}**")
                 if caption:
                     st.caption(caption)
-                up = st.file_uploader(
-                    "내 양식 파일 올리기 (.xlsx) — 안 올리면 기본 양식 사용",
-                    type=["xlsx"], key=f"{key}_up",
-                )
+                with st.expander("다른 양식 파일로 만들기 (선택)"):
+                    st.caption("양식이 바뀌었을 때만 올려주세요. 평소엔 올리실 필요 없어요.")
+                    up = st.file_uploader("양식 파일 (.xlsx)", type=["xlsx"], key=f"{key}_up")
                 if st.button("만들기", key=key):
                     try:
                         if up is not None:
@@ -1462,12 +1458,15 @@ def attendance_edit_view(user):
 
 
 def main():
-    if "user" not in st.session_state:
+    # 아이디·비밀번호 없이 바로 들어가도록 함 (본인 요청).
+    # Secrets에 APP_PASSWORD를 넣으면 그때만 암호 한 번 물어봅니다.
+    pw = _app_password()
+    if pw and not st.session_state.get("unlocked"):
         login_view()
         return
 
-    user = st.session_state["user"]
-    logout_button()
+    user = {"id": 0, "username": "admin", "name": "관리자",
+            "category": "본사", "department": "관리팀", "role": "admin"}
 
     st.title("🗂️ (주)대교통신 HR 플랫폼")
 
@@ -1479,14 +1478,7 @@ def main():
         "admin": lambda: admin_accounts_view(user),
     }
 
-    if user["role"] == "admin":
-        order = _get_tab_order()
-    else:
-        # 일반 직원은 근태일괄입력·근태개별입력 2개만, 관리자가 정한 순서를 그대로 따름
-        order = [k for k in _get_tab_order() if k in ("edit",)]
-        if not order:
-            order = ["edit"]
-
+    order = _get_tab_order()
     tabs = st.tabs([TAB_LABELS[k] for k in order])
     for tab, key in zip(tabs, order):
         with tab:
