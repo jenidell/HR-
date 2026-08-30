@@ -18,7 +18,8 @@ import os
 import re
 
 # 기본 모델. 관리자 화면에서 바꿀 수 있습니다.
-DEFAULT_MODEL = "claude-sonnet-4-5"
+# claude-sonnet-5 는 이전 모델보다 성능도 좋고 요금도 저렴합니다(입력 $2 / 출력 $10 per 100만 토큰).
+DEFAULT_MODEL = "claude-sonnet-5"
 
 # 카톡 대화가 아주 길면 나눠서 검토합니다 (한 번에 보내는 글자 수 상한)
 MAX_CHARS_PER_CHUNK = 55000
@@ -227,6 +228,35 @@ def _build_system_prompt(category, roster, year, month):
   담당자가 직접 확인하고 고칠 것이므로, 애매한 걸 조용히 넘기는 게 제일 나쁘다.
 - 모든 설명(detail, suggestion, summary)은 한국어로, 실무자가 바로 알아들을 수 있게 쓴다.
 - 반드시 '근태검토결과' 도구를 호출해서 답한다."""
+
+
+_DATE_DIVIDER = re.compile(r"^-{3,}\s*(\d{4})년\s*(\d{1,2})월\s*(\d{1,2})일.*?-{3,}\s*$")
+
+
+def filter_month(text, year, month):
+    """
+    카톡 내보내기 파일에서 해당 연/월 구간만 잘라냅니다.
+
+    카톡 파일에는 보통 여러 달이 통째로 들어있는데, 8월 근태를 보려고
+    1~7월 대화까지 AI에게 보내면 요금만 몇 배로 나가고 판단도 흐려집니다.
+    날짜 구분선(--------------- 2026년 8월 29일 토요일 ---------------)을 기준으로
+    해당 월 구간만 남깁니다. 날짜 구분선이 아예 없으면(직접 붙여넣기 등) 원문을 그대로 씁니다.
+
+    반환값: (걸러낸 텍스트, 날짜구분선을 찾았는지 여부)
+    """
+    lines = text.splitlines(keepends=True)
+    # 날짜 구분선이 하나도 없으면 자를 근거가 없으므로 원문을 그대로 씁니다
+    if not any(_DATE_DIVIDER.match(ln.strip()) for ln in lines):
+        return text, False
+
+    kept, keep = [], False
+    for ln in lines:
+        m = _DATE_DIVIDER.match(ln.strip())
+        if m:
+            keep = (int(m.group(1)) == year and int(m.group(2)) == month)
+        if keep:
+            kept.append(ln)
+    return "".join(kept), True
 
 
 def _split_chunks(text, max_chars=MAX_CHARS_PER_CHUNK):
